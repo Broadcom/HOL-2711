@@ -9,25 +9,15 @@
 \_| |_/\__,_|_| |_|\__,_||___/ \___/|_| |_| \_____/\__,_||_.__/|___/
 ```
 
-## REMOVE THIS BLOCK BEFORE PUBLISHING
-
-THIS IS AN EXAMPLE. REPLACE THIS WITH YOUR OWN README.md using the pattern below.
-
-This is customer facing so please make it look professional. Thanks.
-
-This file can be updated and will be copied to the console desktop at startup.
-
-> **NOTE:** this file is public so NEVER include passwords. The official HOL Password is stored in the PASSWORD.txt that is copied to the console at boot.
-
 ## Lab Details
 
 ```plain
 * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - *
-*                       HOL-2711                  *
+*                                   HOL-2711                                    *
 * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - *
 ```
 
-###  Primary benefits of your lab
+### Primary benefits of your lab
 
 Provide information about the lab here
 
