@@ -17,50 +17,58 @@
   * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - * - *
 ```
 
-### Primary benefits of your lab
-
-Provide information about the lab here
+### Introduction
 
 ### Featured Product(s)
 
 More detail about your lab: Products/Features covered in this lab.
 
-  * Product 1
-* Product 2
-* Feature 1
-* Feature 2
+* VCF Operations
+* VCF Operations for logs
+* VCF Operations for networks
+* VCF Operations Orchestrator
+* VCF Automation
 
-Additional notes and "interesting" facts about your lab. (pre-release code, simulated data, etc.)
+## Hands-on Labs
 
-## Modules
 
-Please record account names for this lab. All acccounts use the standard Hands-on Labs password.
 
-### === Module 1 ===
+## The HOL-2711-XX Team
 
-Credentials for all vCenter Operations Manager Instances:
-User name: admin
+The HOL-2711 series of labs are brought to you by a GLOBAL team of Hands-on Labs Principals, Captains and Associates that have dedicated their own time to ensure the best possible experience with VCF Operations and VCF Automation.
 
-For vCenter Server Administration Console:
-User name: root
+### Principal(s)
 
-For the vSphere Client, use:
-User name: administrator@vsphere.local
-
-### === Module 2 ===
-
-big long command line that nobody wants to type
-
-## Lab Authors
-
-### Principal
-
-  * Principal Name:
+* Christopher Lewis, EMEA Domain Expert: VCF Automation and VCF Operations, UK
+* Katherine Skilling, PS Senior Architect, UK
 
 ### Captain(s)
 
-  * Captain:
-  * Captain:
+* Alexis Rondeau, Staff Technical Adoption Manager, Canada
+* Bastian Beuggert, Solutions Architect, Switzerland
+* Brock Peterson, Solutions Architect, USA
+* Cosmin Trif, Solutions Architect, USA
+* Ellen Meeus, Technical Adoption Manager, Belgium
+* Fred Hofer, Technical Adoption Manager, Switzerland
+* Ian Smith, Technical Adoption Manager, USA
+* Kate Rychlik, Senior Solutions Architect, Netherlands
+* Scott Bowe, Solutions Architect, USA
+* Shannon Fitzpatrick, Staff Technical Adoption Manager, USA
+* Thomas Kopton, Solution Architect, Germany
+* Varghese Philipose, Principle Technical Adoption Manager, Dubai
+* William de Marigny, Staff Technical Adoption Manager, USA
+
+### Associate Captain(s)
+
+* Desislava Anastasova, Software Engineer, Bulgaria
+* Janick Marlhioud, Senior Technical Adoption Manager, Canada
+* John Dias, Technical Adoption Manager, USA
+* Mayank Goyal, PS Technical Consultant, India
+* Nigel Venables, Technical Adoption Manager, UK
+* Stuart Burton, Solutions Architect, UK
+* Vedat Kurshumliju, Technical Adoption Manager, UK
+
+## About the Pod
 
 ### User Accounts
 
