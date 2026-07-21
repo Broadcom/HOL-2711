@@ -1,0 +1,3 @@
+#openssl genrsa -out vmflowgen.key 4096
+
+openssl req -new -newykey rsa:4096 -nodes -keyout vmflowgen.key -out vmflowgen.csr -config vmflowgen.cfg
