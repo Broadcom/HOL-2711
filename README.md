@@ -70,6 +70,10 @@ The HOL-2711 series of labs are brought to you by a GLOBAL team of Hands-on Labs
 
 ## About the Pod
 
+### ArgoCD Default password
+
+uneqg-8wa7HSYhwd
+
 ### User Accounts
 
 #### VCF-wide Accounts
