@@ -1,0 +1,8 @@
+apiVersion: argocd-service.vsphere.vmware.com/v1alpha1
+kind: ArgoCD
+metadata:
+  name: argocd
+  namespace: REPLACE-WITH-ELW-NAMESPACE
+spec:
+  version: "3.0.19+vmware.1-vks.1"
+  enableLoadBalancer: true

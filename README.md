@@ -70,9 +70,16 @@ The HOL-2711 series of labs are brought to you by a GLOBAL team of Hands-on Labs
 
 ## About the Pod
 
-### ArgoCD Default password
+### GitLab - Access Token - ArgoCD
 
-uneqg-8wa7HSYhwd
+Project: hol-gitops/infra
+Token: glpat-UeoWGLSyv1vNhoZ5sHcoHW86MQp1OjgH.01.0w1ledwv0
+
+### GitLab - Access Token - Root
+
+Project: hol-gitops/infra
+Token: glpat-ZlOtIeiNCkIEt3KOKRxip286MQp1OjEH.01.0w0wol4lh
+
 
 ### User Accounts
 
