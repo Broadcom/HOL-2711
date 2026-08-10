@@ -1,0 +1,1 @@
+killall grep yes tr head
