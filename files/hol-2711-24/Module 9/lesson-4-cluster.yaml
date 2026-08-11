@@ -1,0 +1,29 @@
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Cluster
+metadata:
+  name: m9-workload
+  namespace: <NAMESPACE_FROM_LESSON_3>
+spec:
+  clusterNetwork:
+    pods:
+      cidrBlocks:
+        - 192.168.156.0/20
+    services:
+      cidrBlocks:
+        - 10.96.0.0/12
+    serviceDomain: cluster.local
+  topology:
+    class: builtin-generic-v3.6.0
+    version: v1.33.6+vmware.1-fips
+    variables:
+      - name: vmClass
+        value: best-effort-medium
+      - name: storageClass
+        value: vsan-default-storage-policy
+    controlPlane:
+      replicas: 1
+    workers:
+      machineDeployments:
+        - class: node-pool
+          name: node-pool-1
+          replicas: 2
