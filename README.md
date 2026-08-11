@@ -73,13 +73,12 @@ The HOL-2711 series of labs are brought to you by a GLOBAL team of Hands-on Labs
 ### GitLab - Access Token - ArgoCD
 
 Project: hol-gitops/infra
-Token: glpat-UeoWGLSyv1vNhoZ5sHcoHW86MQp1OjgH.01.0w1ledwv0
+Token File: /home/holuser/Desktop/PAT-SciTech.Gitops-Gitlab.txt
 
 ### GitLab - Access Token - Root
 
 Project: hol-gitops/infra
-Token: glpat-ZlOtIeiNCkIEt3KOKRxip286MQp1OjEH.01.0w0wol4lh
-
+Token File: /home/holuser/Desktop/PAT-Root-Gitlab.txt
 
 ### User Accounts
 
