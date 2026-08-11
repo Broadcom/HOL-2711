@@ -6,4 +6,4 @@ vcfa_user     = "admin"
 vcfa_password = "<VCFA_ORG_ADMIN_PASSWORD>"
 
 project   = "scitech-gitops"
-namespace = "<ELW_SUPERVISOR_NAMESPACE>"
+namespace = "ns-scitech-gitops-lynys"
