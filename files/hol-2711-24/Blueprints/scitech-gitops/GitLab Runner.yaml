@@ -1,0 +1,262 @@
+formatVersion: 2
+name: GitLab Runner
+description: Deploy a GitLab CI runner as vSphere Pods, pre-registered with a baked authentication token
+version: 1
+metadata:
+  deploymentSettings:
+    hideDisabledDay2Actions: true
+outputs:
+  __deploymentOverview:
+    value: |-
+      ## GitLab Runner
+
+      A GitLab CI runner is now running as a vSphere Pod in
+      `${input.namespace}` and polling `${input.gitlabUrl}` for jobs.
+
+      * Executor: **shell**. Jobs run inside the runner container itself, so
+        every tool a job needs (terraform, kubectl, python3, git, jq) is
+        already baked into the image.
+      * Terraform providers come from an on-disk mirror in that image, so
+        `terraform init` never reaches the internet.
+      * Registration used a pre-created **authentication token**, so there is
+        no registration step at boot and the runner is safe to restart.
+
+      **Confirm it is online:** in GitLab, Admin > CI/CD > Runners. It should
+      appear as `${input.runnerName}` with a green status within about a
+      minute of the pods starting.
+
+      **Target it from a pipeline** with the tags it was created with, for
+      example:
+
+      ```
+      job:
+        tags: [vcf]
+        script:
+          - terraform version
+      ```
+
+      **Read its log:**
+
+      ```
+      kubectl -n ${input.namespace} logs deploy/gitlab-runner-${env.shortDeploymentId}
+      ```
+inputs:
+  namespace:
+    type: string
+    title: Namespace
+    default: ns-scitech-gitops-lynys
+  gitlabUrl:
+    type: string
+    title: GitLab URL
+    default: https://gitlab.vcf.lab
+  runnerName:
+    type: string
+    title: Runner Name
+    default: hol-vsphere-pod-runner
+  runnerToken:
+    type: string
+    title: Runner Authentication Token
+    default: REPLACE-WITH-glrt-TOKEN
+  gitlabCABase64:
+    # Carried by the BLUEPRINT, not pasted at request time and not baked into
+    # the image. The image is one signed release used in every environment
+    # and deliberately carries no environment fact; the blueprint is the
+    # per-environment artifact. scripts/hol_pod_provision.py swaps this
+    # default (and gitlabUrl) for the target environment's at import.
+    #
+    # This used to be REPLACE-WITH-BASE64-CA and it failed in the worst way.
+    # The value is a single ~2700 character line, so a paste into the request
+    # form truncates it invisibly, and update-ca-certificates SILENTLY IGNORES
+    # a file it cannot parse: no error, no warning, no non-zero exit. The only
+    # symptom is the runner polling forever with "x509: certificate signed by
+    # unknown authority", which reads like a token or network fault.
+    #
+    # It must be the ROOT of the chain (self-signed, subject == issuer), which
+    # is the LAST certificate the server presents, not the first. To regenerate
+    # for another environment see docs/hol-2711-gitops-demo.md, section
+    # "Replacing the runner CA".
+    #
+    # Current value: CN = sentania Lab Root 2, expires 2042-10-04.
+    type: string
+    title: GitLab CA certificate (base64 of a PEM)
+    default: 'LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURNekNDQWh1Z0F3SUJBZ0lVTCsyN0QySDJZcllJRGd1QllUK2VLclBxLzJzd0RRWUpLb1pJaHZjTkFRRUwKQlFBd0lURWZNQjBHQTFVRUF4TVdkbU5tTG14aFlpQlNiMjkwSUVGMWRHaHZjbWwwZVRBZUZ3MHlOakF6TWpjeQpNVEUxTURSYUZ3MHpOakF6TWpReU1URTFNek5hTUNFeEh6QWRCZ05WQkFNVEZuWmpaaTVzWVdJZ1VtOXZkQ0JCCmRYUm9iM0pwZEhrd2dnRWlNQTBHQ1NxR1NJYjNEUUVCQVFVQUE0SUJEd0F3Z2dFS0FvSUJBUURhUmpWTHF6dmwKanMrVlk2OTR0b0FleHJQaFlTUWxNd0VuK3J3UStsdXQxOEd0ZjhrMjM4SFBhSXBMdWczWW1VcTRlc2J6ZlV3Uwp1K2l2Nm92c0hMRzZyT0JNcy81TDBzOTBWOGQ1SGV3T3RZdlFyTWNjbjlOcGhjSE9tQkdDQUZuMGJrZjFkUlc1CkFJUnFiMnBrU1R0MCtsdHpqQS90ZkxZSFBaKzBwTTkrOFI3Y3pveUVjeTdwOVQ4dDFTZGR5b3Bjdnc4L3NrbG8KYVNJWFdKbmpoOG53a2h1SjNuRVViZlBWMTBUTHRZV21SSE9FdkZaOHhnSEJlNDJveEtZZkNEQWY5amJlR0xHQQpwRTYrMS80WjFJWm14dm1UN2orTlkrclM2djJVbGxZbEhyanc0VDVaRzRXRmoyZldCWTZnQXhNcFc1NWxBMWFKClRNOHRvT2hiZkJtN0FnTUJBQUdqWXpCaE1BNEdBMVVkRHdFQi93UUVBd0lCQmpBUEJnTlZIUk1CQWY4RUJUQUQKQVFIL01CMEdBMVVkRGdRV0JCU2JSWFBWMldDRW9CeEZNcUh6azh0MjZHRHlQREFmQmdOVkhTTUVHREFXZ0JTYgpSWFBWMldDRW9CeEZNcUh6azh0MjZHRHlQREFOQmdrcWhraUc5dzBCQVFzRkFBT0NBUUVBRTRObU9PTWZrVHkyCkJRYlBTeGI1OC9tUEVDNGFoSzNEdjVCNlVrWW1sTHpjcWJ3ck9MYWpLT044RXZTRFQxRDQvMTNuaGtQUHYveGIKbWlZNm5OZFIxMDdzNjlidEdoRHUrd0k1OTlQRWxoVzlnN1pFU3c1STRHNVI2cjFuc1NWU1VDeDZmRkF6MU4yTwoyTmN6Vms0NEphcHRBeStDdTdBSnRnS0todjVqd3Avcm1kUi9QRXp2b1g3d3g2UmVlSTRPWjZoaGxRa054ZDRiCjFNM0pSUW1RcEwvK1hLQnpmU0YvU3dpc1FLbEN5bEo5d1FDVFRTakVsZ0wrTW1LSDhhVWtVREFZaCs1anZ4SlkKVDdSbklUb1o3c1FkZzY5RnRtYnpyQmxXN3gzdGpjb0NNZ2tidGxTaitYaXVjcG9UUDVRK2h3amRrek1sdkZSWApwQ0hrOVRrY293PT0KLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQo='
+  concurrentJobs:
+    # Deliberately a string, not an integer. Substitution preserves the input's
+    # type, and a Kubernetes env var `value` must be a string: an integer here
+    # fails the deployment with "cannot unmarshal number into Go struct field
+    # EnvVar.spec.template.spec.containers.env.value of type string".
+    type: string
+    title: Concurrent Jobs
+    default: '2'
+    enum: ['1', '2', '4']
+resources:
+  cciNamespace:
+    type: CCI.Supervisor.Namespace
+    metadata:
+      layoutPosition: [1, 0]
+    properties:
+      name: ${input.namespace}
+      existing: true
+  # NO ServiceAccount, Role or RoleBinding, deliberately. The runner is a
+  # GENERIC executor: it registers with GitLab, runs jobs, and carries no
+  # platform identity. Jobs that need the Kubernetes API mint their own
+  # short-lived credential from the same CI variables terraform already uses
+  # (see .kube_login in hol-infra/.gitlab-ci.yml): session JWT from
+  # /cloudapi/1.0.0/sessions, endpoint from the supervisornamespace object's
+  # status.namespaceEndpointURL, plain kubectl against that proxy.
+  #
+  # This matters for portability: creating Role/RoleBinding objects needs the
+  # Supervisor Authorization Service (vSphere 9.1.0.0300+), and a supervisor
+  # without it fails the deploy with an RBAC escalation error. Workload
+  # objects like this Deployment are covered by plain ClusterRole edit
+  # everywhere.
+  runnerDeployment:
+    type: CCI.Supervisor.Resource
+    dependsOn:
+      - cciNamespace
+    metadata:
+      layoutPosition: [1, 1]
+    properties:
+      context: ${resource.cciNamespace.id}
+      manifest:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: gitlab-runner-${env.shortDeploymentId}
+          labels:
+            app: gitlab-runner-${env.shortDeploymentId}
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: gitlab-runner-${env.shortDeploymentId}
+          template:
+            metadata:
+              labels:
+                app: gitlab-runner-${env.shortDeploymentId}
+            spec:
+              # default SA on purpose: the runner holds no k8s identity.
+              containers:
+                - name: runner
+                  # Pinned to a released tag, never :latest. The image is
+                  # built, scanned and cosign-signed in public at
+                  # github.com/sentania-labs/air-gap-gitlab-ci-tools and
+                  # mirrored here, so what runs the pipeline is auditable:
+                  #   ghcr.io/sentania-labs/air-gap-gitlab-ci-tools:v1.0.0
+                  #   signed OCI index  sha256:d6b60258c03e5b4329b645146845d5785202ee256337d221defe2288d1407572
+                  #   amd64 manifest    sha256:1487ad32f3e4df61da49a6365784de2786a4c524e9fbd7dfbeb21f679aa08d6a
+                  # A docker pull/push mirror FLATTENS the index and mints a
+                  # NEW manifest digest (this Harbor copy serves sha256:7edc24fa...).
+                  # Mirror with `skopeo copy --all` to keep the signed digest,
+                  # or verify a docker-mirrored copy by IMAGE ID (config
+                  # digest), which survives re-push. Digest mismatch here is
+                  # the mirror tool's envelope, not a republished tag.
+                  image: depot.kube-system.svc/hol/ci-tools:v1.0.0
+                  env:
+                    - name: CI_SERVER_URL
+                      value: ${input.gitlabUrl}
+                    - name: RUNNER_NAME
+                      value: ${input.runnerName}
+                    - name: RUNNER_TOKEN
+                      value: ${input.runnerToken}
+                    - name: LAB_CA_B64
+                      value: ${input.gitlabCABase64}
+                    - name: RUNNER_CONCURRENT
+                      value: '${input.concurrentJobs}'
+                  command: ['/bin/bash', '-c']
+                  args:
+                    - |
+                      set -euo pipefail
+
+                      # NOTE: every shell variable below is written bare, as
+                      # $VAR. VCFA blueprint substitution owns the dollar-brace
+                      # syntax, so a braced shell variable is parsed as a
+                      # blueprint expression and the deployment 400s. That
+                      # applies to comments in this script too, not just code.
+
+                      # Trust the lab CA system-wide, not just for the runner's
+                      # own API calls. git clone, terraform, curl and argocd all
+                      # use the system store, so installing it once here fixes
+                      # every tool instead of only gitlab-runner.
+                      CA=/usr/local/share/ca-certificates/lab-ca.crt
+                      echo "$LAB_CA_B64" | base64 -d > "$CA" 2>/dev/null || {
+                        echo "FATAL: gitlabCABase64 is not valid base64." >&2
+                        exit 1
+                      }
+
+                      # Validate BEFORE trusting. update-ca-certificates
+                      # silently ignores a file it cannot parse: no error, no
+                      # warning, exit 0. A truncated or wrong-format value
+                      # therefore produces a runner that starts cleanly and
+                      # then polls forever with "x509: certificate signed by
+                      # unknown authority", which reads like a bad token.
+                      # Fail here instead, where the cause is obvious.
+                      if ! openssl x509 -in "$CA" -noout -subject >/dev/null 2>&1; then
+                        echo "FATAL: gitlabCABase64 did not decode to a usable PEM certificate." >&2
+                        echo "  decoded bytes : $(wc -c < "$CA")" >&2
+                        echo "  first line    : $(head -n1 "$CA")" >&2
+                        echo "  last line     : $(tail -n1 "$CA")" >&2
+                        echo "  a complete PEM starts with -----BEGIN CERTIFICATE-----" >&2
+                        echo "  and ends with  -----END CERTIFICATE-----" >&2
+                        echo "  if either marker is missing or cut short, the value was" >&2
+                        echo "  truncated in transit - it is one ~2700 character line." >&2
+                        exit 1
+                      fi
+                      echo "installing CA: $(openssl x509 -in "$CA" -noout -subject)"
+
+                      # A root is self-signed. If these differ the value is an
+                      # intermediate, which fails the same silent way.
+                      if [ "$(openssl x509 -in "$CA" -noout -subject)" \
+                           != "$(openssl x509 -in "$CA" -noout -issuer | sed s/issuer=/subject=/)" ]; then
+                        echo "WARNING: CA is not self-signed - this is an intermediate," >&2
+                        echo "  not a root. Verification will probably fail." >&2
+                      fi
+
+                      update-ca-certificates
+
+                      # Prove trust works before entering the poll loop. Any
+                      # HTTP response means TLS verified; 401 is expected and
+                      # fine. Only a connection/TLS failure is fatal.
+                      if ! curl -sS -o /dev/null -w '' "$CI_SERVER_URL/api/v4/version"; then
+                        echo "FATAL: cannot establish TLS to $CI_SERVER_URL after installing the CA." >&2
+                        exit 1
+                      fi
+                      echo "TLS to $CI_SERVER_URL verified"
+
+                      # config.toml has to live on a writable path: gitlab-runner
+                      # writes a .runner_system_id file next to it on first start.
+                      # A ConfigMap mount is read-only, so it is generated here
+                      # into an emptyDir instead.
+                      mkdir -p /etc/gitlab-runner /builds
+                      cat > /etc/gitlab-runner/config.toml <<TOML
+                      concurrent = $RUNNER_CONCURRENT
+                      check_interval = 3
+                      log_level = "info"
+
+                      [[runners]]
+                        name = "$RUNNER_NAME"
+                        url = "$CI_SERVER_URL"
+                        token = "$RUNNER_TOKEN"
+                        executor = "shell"
+                        shell = "bash"
+                        builds_dir = "/builds"
+                        cache_dir = "/builds/cache"
+                        # Without this the runner warns about a long-polling
+                        # bottleneck and jobs sit idle for the poll timeout
+                        # before starting.
+                        request_concurrency = 2
+                      TOML
+
+                      exec gitlab-runner run \
+                        --config /etc/gitlab-runner/config.toml \
+                        --working-directory /builds
+                  volumeMounts:
+                    - name: runner-config
+                      mountPath: /etc/gitlab-runner
+                    - name: builds
+                      mountPath: /builds
+              volumes:
+                - name: runner-config
+                  emptyDir: {}
+                - name: builds
+                  emptyDir: {}

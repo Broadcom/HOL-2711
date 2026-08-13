@@ -1,0 +1,150 @@
+
+# Terraform state lives in GitLab's own HTTP backend: free in CE, already
+# present in the pod, real locking, and the state file is visible in the UI
+# under Operate > Terraform states. No extra service to run.
+#
+# Credentials go in TF_HTTP_USERNAME / TF_HTTP_PASSWORD, NOT in -backend-config.
+# A saved plan file records the backend address but deliberately does not
+# persist credentials, so `terraform apply tfplan` in a later job fails with
+# "HTTP remote state endpoint requires auth" if they were only passed at init.
+variables:
+  TF_STATE_NAME: infra
+  TF_HTTP_USERNAME: gitlab-ci-token
+  TF_HTTP_PASSWORD: $CI_JOB_TOKEN
+
+# Supervisor access for jobs, with NO runner-side identity. The runner is a
+# generic executor; any job that needs the Kubernetes API mints its own
+# short-lived credential here, from the SAME variables terraform uses:
+#   1. session JWT from VCFA (basic auth, ~30 min lifetime, minted per job)
+#   2. the namespace's k8s endpoint from the supervisornamespace object
+#   3. a throwaway kubeconfig so every later kubectl just works
+# Nothing is stored: the kubeconfig dies with the job workspace.
+.kube_login: &kube_login
+  - |
+    JWT=$(curl -sk -X POST "${TF_VAR_vcfa_url}/cloudapi/1.0.0/sessions" \
+      -H "Accept: application/json;version=9.1.0" \
+      -u "${TF_VAR_vcfa_user}@${TF_VAR_vcfa_org}:${TF_VAR_vcfa_password}" \
+      -D - -o /dev/null | awk -F': ' 'tolower($1)=="x-vmware-vcloud-access-token"{printf "%s",$2}' | tr -d '\r')
+    test -n "$JWT" || { echo "FATAL: could not mint a VCFA session (check TF_VAR_vcfa_* variables)"; exit 1; }
+    # project comes from the same tfvars terraform uses; not a CI variable
+    PROJECT=$(sed -n 's/^project[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' terraform.tfvars)
+    test -n "$PROJECT" || { echo "FATAL: no project in terraform.tfvars"; exit 1; }
+    BODY=$(curl -sk "${TF_VAR_vcfa_url}/cci/kubernetes/apis/infrastructure.cci.vmware.com/v1alpha3/namespaces/${PROJECT}/supervisornamespaces/${SUPERVISOR_NS}" -H "Authorization: Bearer $JWT")
+    EP=$(printf '%s' "$BODY" | python3 -c 'import sys,json;o=json.load(sys.stdin);st=o.get("status");print(st.get("namespaceEndpointURL","") if isinstance(st,dict) else "")' 2>/dev/null || true)
+    test -n "$EP" || { echo "FATAL: supervisornamespace lookup failed: $(printf '%.200s' "$BODY")"; exit 1; }
+    export KUBECONFIG="$CI_PROJECT_DIR/.supervisor.kubeconfig"
+    kubectl config set-cluster supervisor --server="$EP" --insecure-skip-tls-verify=true >/dev/null
+    kubectl config set-credentials ci --token="$JWT" >/dev/null
+    kubectl config set-context supervisor --cluster=supervisor --user=ci --namespace="${SUPERVISOR_NS}" >/dev/null
+    kubectl config use-context supervisor >/dev/null
+    kubectl auth whoami >/dev/null || { echo "FATAL: supervisor endpoint rejected the session"; exit 1; }
+
+.tf_init: &tf_init
+  - ADDR="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/terraform/state/${TF_STATE_NAME}"
+  - |
+    terraform init -input=false \
+      -backend-config="address=${ADDR}" \
+      -backend-config="lock_address=${ADDR}/lock" \
+      -backend-config="unlock_address=${ADDR}/lock" \
+      -backend-config="lock_method=POST" \
+      -backend-config="unlock_method=DELETE" \
+      -backend-config="retry_wait_min=5"
+
+# All five stages are declared even though two have no jobs yet. A stage with
+# no jobs is simply skipped, and declaring them up front means Module 3 is one
+# edit (uncomment the jobs) rather than two (uncomment the jobs AND remember to
+# add the stages).
+stages: [plan, apply, register, seed, destroy]
+
+# Every job that touches terraform state shares one resource_group so GitLab
+# runs them one at a time. Without it, two commits close together start two
+# pipelines that race for the state lock, and the loser dies with
+# "Error acquiring the state lock ... HTTP remote state already locked".
+# That reads like a broken lab rather than a race, and a workshop is exactly
+# where someone commits three times in a row while iterating.
+# plan is included on purpose: terraform plan takes the state lock too.
+plan:
+  stage: plan
+  tags: [vcf]
+  resource_group: terraform-state
+  script:
+    - *tf_init
+    - terraform plan -input=false -out=tfplan
+  artifacts:
+    paths: [tfplan, .terraform.lock.hcl]
+    expire_in: 1 day
+
+apply:
+  stage: apply
+  tags: [vcf]
+  resource_group: terraform-state
+  script:
+    - *tf_init
+    - terraform apply -input=false -auto-approve tfplan
+    - terraform output -json > tf-outputs.json
+  artifacts:
+    paths: [tf-outputs.json]
+    expire_in: 1 day
+
+# ===========================================================================
+# MODULE 3 STARTS HERE
+#
+# Right now this pipeline builds a cluster and stops. Argo CD has no idea the
+# cluster exists, so nothing gets deployed onto it.
+#
+# To finish the chain, delete the leading "# " from every line between this
+# marker and the END marker below, then commit. Both stages are already
+# declared above, so nothing else needs changing.
+# ===========================================================================
+
+# # The handoff with no built-in equivalent: VCF Automation just built a
+# # cluster and Argo CD has no idea it exists. The admin kubeconfig is already
+# # published as the CAPI <cluster>-kubeconfig secret, so this reads it and
+# # writes the corresponding Argo cluster secret. kubectl uses the throwaway
+# # kubeconfig minted by .kube_login above: the runner itself has no identity.
+# register-with-argocd:
+#   stage: register
+#   tags: [vcf]
+#   script:
+#     - *kube_login
+#     - CLUSTER=$(jq -r '.cluster_name.value' tf-outputs.json)
+#     - echo "registering $CLUSTER with Argo CD"
+#     - python3 argocd_register_cluster.py --cluster "$CLUSTER" --namespace "$SUPERVISOR_NS" --name "$CLUSTER"
+#
+# # Hands the database credential to the cluster that was just built. The
+# # database was created in Module 1 and lives on its own VM, in its own
+# # Terraform state, so it outlives every cluster built here.
+# #
+# # Runs on EVERY pipeline, not just the first: a rebuilt cluster is empty and
+# # has no idea how to reach the database until this puts the credential back.
+# #
+# # This is also what keeps the password out of git. demo/hol-apps refers to
+# # the Secret by name; only the platform and this pipeline see its value.
+# seed-db-credentials:
+#   stage: seed
+#   tags: [vcf]
+#   script:
+#     - *kube_login
+#     - CLUSTER=$(jq -r '.cluster_name.value' tf-outputs.json)
+#     - bash seed_db_credentials.sh "$CLUSTER" "$SUPERVISOR_NS" hol-wordpress
+
+# ===========================================================================
+# MODULE 3 ENDS HERE
+# ===========================================================================
+
+# The teardown act. MANUAL on purpose: this destroys the Kubernetes cluster and
+# every workload in it. It does NOT touch demo/hol-data, which holds the
+# database on its own VM in its own state file, so the site's content survives.
+#
+# Re-running the pipeline afterwards rebuilds the cluster, re-registers it with
+# Argo CD, re-seeds the credential, and Argo puts WordPress back. The site
+# returns with its posts intact.
+destroy-cluster:
+  stage: destroy
+  tags: [vcf]
+  when: manual
+  allow_failure: false
+  resource_group: terraform-state
+  script:
+    - *tf_init
+    - terraform destroy -input=false -auto-approve

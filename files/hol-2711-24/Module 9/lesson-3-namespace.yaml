@@ -1,0 +1,20 @@
+apiVersion: infrastructure.cci.vmware.com/v1alpha2
+kind: SupervisorNamespace
+metadata:
+  generateName: ns-m9-demo-
+  namespace: m9-demo-project
+spec:
+  className: small
+  regionName: us-east-a
+  vpcName: default-us-east-a
+  description: HOL-2711-24 Module 9 namespace
+  initialClassConfigOverrides:
+    zones:
+      - name: z-wld-a
+        cpuLimit: "10000M"
+        cpuReservation: "0M"
+        memoryLimit: "10000Mi"
+        memoryReservation: "0Mi"
+    storageClasses:
+      - name: vsan-default-storage-policy
+        limit: "100000Mi"

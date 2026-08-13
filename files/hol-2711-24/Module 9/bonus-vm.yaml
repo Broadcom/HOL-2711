@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: m9-cli-vm-bootstrap
+stringData:
+  password: '<SHA512_PASSWORD_HASH>'
+---
+apiVersion: vmoperator.vmware.com/v1alpha3
+kind: VirtualMachine
+metadata:
+  name: m9-cli-vm
+  labels:
+    vm-lb: m9-cli-vm
+spec:
+  className: best-effort-small
+  imageName: ubuntu-24-04-gold-ovf
+  storageClass: vsan-default-storage-policy
+  powerState: PoweredOn
+  bootstrap:
+    cloudInit:
+      cloudConfig:
+        ssh_pwauth: true
+        users:
+          - name: ubuntu
+            sudo: ALL=(ALL) NOPASSWD:ALL
+            lock_passwd: false
+            hashed_passwd:
+              name: m9-cli-vm-bootstrap
+              key: password
+---
+apiVersion: vmoperator.vmware.com/v1alpha3
+kind: VirtualMachineService
+metadata:
+  name: m9-cli-vm-lb
+spec:
+  type: LoadBalancer
+  selector:
+    vm-lb: m9-cli-vm
+  ports:
+    - name: ssh
+      protocol: TCP
+      port: 22
+      targetPort: 22

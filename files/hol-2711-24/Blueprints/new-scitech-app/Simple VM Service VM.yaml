@@ -1,0 +1,71 @@
+formatVersion: 2
+name: Simple VM Service VM
+description: Deploy a single Linux VM via VM Service, with SSH published on a load balancer
+inputs: {}
+outputs:
+  sshCommand:
+    value: ssh holuser@${resource.LoadBalancer.object.status.loadBalancer.ingress[0].ip}
+  loadBalancerIp:
+    value: ${resource.LoadBalancer.object.status.loadBalancer.ingress[0].ip}
+  __deploymentOverview:
+    value: |-
+      ## Linux VM with SSH published on a load balancer
+
+      A VM Service virtual machine was created in the supervisor namespace and
+      published through a load balancer on port 22.
+
+      **Connect:**
+
+      ```
+      ssh holuser@${resource.LoadBalancer.object.status.loadBalancer.ingress[0].ip}
+      ```
+
+      * VM: `virtual-machine-1-${env.shortDeploymentId}`
+      * Load balancer: `vm-lb-hol-simple-vm-${env.shortDeploymentId}`
+      * Image: `ubuntu-24-04-gold-ovf`
+      * Login: `holuser` / the HOL standard password (baked into the image)
+resources:
+  CCI_Supervisor_Namespace_1:
+    type: CCI.Supervisor.Namespace
+    properties:
+      name: ns-new-scitech-app-7hmlb
+      existing: true
+  Virtual_Machine_1:
+    type: CCI.Supervisor.Resource
+    properties:
+      context: ${resource.CCI_Supervisor_Namespace_1.id}
+      manifest:
+        apiVersion: vmoperator.vmware.com/v1alpha3
+        kind: VirtualMachine
+        metadata:
+          name: virtual-machine-1-${env.shortDeploymentId}
+          labels:
+            vm-selector: hol-simple-vm
+            vm-lb: vm-lb-hol-simple-vm-${env.shortDeploymentId}
+        spec:
+          className: best-effort-small
+          imageName: ubuntu-24-04-gold-ovf
+          powerState: PoweredOn
+          storageClass: vsan-default-storage-policy
+      wait:
+        conditions:
+          - type: VirtualMachineCreated
+            status: 'True'
+  LoadBalancer:
+    type: CCI.Supervisor.Resource
+    properties:
+      context: ${resource.CCI_Supervisor_Namespace_1.id}
+      manifest:
+        apiVersion: vmoperator.vmware.com/v1alpha3
+        kind: VirtualMachineService
+        metadata:
+          name: vm-lb-hol-simple-vm-${env.shortDeploymentId}
+        spec:
+          selector:
+            vm-lb: vm-lb-hol-simple-vm-${env.shortDeploymentId}
+          type: LoadBalancer
+          ports:
+            - name: ssh
+              protocol: TCP
+              port: 22
+              targetPort: 22
