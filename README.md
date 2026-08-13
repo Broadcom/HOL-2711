@@ -70,6 +70,16 @@ The HOL-2711 series of labs are brought to you by a GLOBAL team of Hands-on Labs
 
 ## About the Pod
 
+### GitLab - Access Token - ArgoCD
+
+Project: hol-gitops/infra
+Token File: /home/holuser/Desktop/PAT-SciTech.Gitops-Gitlab.txt
+
+### GitLab - Access Token - Root
+
+Project: hol-gitops/infra
+Token File: /home/holuser/Desktop/PAT-Root-Gitlab.txt
+
 ### User Accounts
 
 #### VCF-wide Accounts
@@ -85,42 +95,42 @@ The HOL-2711 series of labs are brought to you by a GLOBAL team of Hands-on Labs
 
 ##### VCF Viewer
 
-* **Username:**  vcf.viewer
+* **Username:** vcf.viewer
 * **Email:** vcf.viewer@vcf.lab
 * **Group Membership:**
   * vcf-viewers
   
 ##### Sddc Admin
 
-* **Username:**  sddc.admin
+* **Username:** sddc.admin
 * **Email:** sddc.admin@vcf.lab
 * **Group Membership:**
   * vcf-sddc-admins
   
 ##### Sddc Viewer
 
-* **Username:**  sddc.viewer
+* **Username:** sddc.viewer
 * **Email:** sddc.viewer@vcf.lab
 * **Group Membership:**
   * vcf-sddc-viewers
 
 ##### Ops Admin
 
-* **Username:**  ops.admin
+* **Username:** ops.admin
 * **Email:** ops.admin@vcf.lab
 * **Group Membership:**
   * vcf-operations-admins
 
 ##### Ops User
 
-* **Username:**  ops.user
+* **Username:** ops.user
 * **Email:** ops.user@vcf.lab
 * **Group Membership:**
   * vcf-operations-users
 
 ##### Ops Viewer
 
-* **Username:**  ops.viewer
+* **Username:** ops.viewer
 * **Email:** ops.viewer@vcf.lab
 * **Group Membership:**
   * vcf-operations-viewers
@@ -129,115 +139,326 @@ The HOL-2711 series of labs are brought to you by a GLOBAL team of Hands-on Labs
 
 ##### FinTech Admin
 
-* **Username:**  fintech.admin
+* **Username:** fintech.admin
 * **Email:** fintech.admin@vcf.lab
 * **Group Membership:**
   * FinTech-admins
-  * vcf-automation-org-owners
-  * vcf-automation-org-members
+  * FinTech-org-members
   * vcf-operations-users
 
-##### FinTech User
+##### FinTech User 01
 
-* **Username:**  fintech.user
-* **Email:** fintech.user@vcf.lab
+* **Username:** fintech.user01
+* **Email:** fintech.user01@vcf.lab
 * **Group Membership:**
   * FinTech-users
-  * vcf-automation-org-members
+  * FinTech-org-members
+  * vcf-operations-viewers
+
+##### FinTech User 02
+
+* **Username:** fintech.user02
+* **Email:** fintech.user02@vcf.lab
+* **Group Membership:**
+  * FinTech-users
+  * FinTech-org-members
+  * vcf-operations-viewers
+
+##### FinTech DevOps User 01
+
+* **Username:** fintech.dev01
+* **Email:** fintech.dev01@vcf.lab
+* **Group Membership:**
+  * FinTech-org-members
+  * FinTech-developers
+  * vcf-operations-viewers
+
+##### FinTech Dev User 02
+
+* **Username:** fintech.dev02
+* **Email:** fintech.dev02@vcf.lab
+* **Group Membership:**
+  * FinTech-org-members
+  * FinTech-developers
+  * vcf-operations-viewers
+
+##### FinTech DevOps User 01
+
+* **Username:** fintech.devops01
+* **Email:** fintech.devops01@vcf.lab
+* **Group Membership:**
+  * FinTech-users
+  * FinTech-org-members
+  * FinTech-developers
+  * vcf-operations-viewers
+
+##### FinTech DevOps User 02
+
+* **Username:** fintech.devops02
+* **Email:** fintech.devops02@vcf.lab
+* **Group Membership:**
+  * FinTech-users
+  * FinTech-org-members
+  * FinTech-developers
+  * vcf-operations-viewers
+
+##### FinTech GitOps User
+
+* **Username:** fintech.gitops
+* **Email:** fintech.gitops@vcf.lab
+* **Group Membership:**
+  * FinTech-org-members
+  * FinTech-developers
+  * vcf-operations-viewers
+
+##### FinTech Support
+
+* **Username:** fintech.support
+* **Email:** fintech.support@vcf.lab
+* **Group Membership:**
+  * FinTech-support-users
+  * FinTech-org-members
   * vcf-operations-viewers
 
 ##### FinTech Approver
 
-* **Username:**  fintech.approver
+* **Username:** fintech.approver
 * **Email:** fintech.approver@vcf.lab
 * **Group Membership:**
   * FinTech-users
-  * vcf-automation-org-members
+  * FinTech-org-members
   * vcf-operations-viewers
 
-##### FinTech Developer
+##### FinTech Manager
 
-* **Username:**  fintech.developer
-* **Email:** fintech.developer@vcf.lab
+* **Username:** fintech.manager
+* **Email:** fintech.manager@vcf.lab
 * **Group Membership:**
-  * FinTech-developers
-  * vcf-automation-org-members
+  * FinTech-org-members
+  * vcf-operations-viewers
+
+##### FinTech Project Admin
+
+* **Username:** fintech.project
+* **Email:** fintech.project@vcf.lab
+* **Group Membership:**
+  * FinTech-org-members
   * vcf-operations-viewers
 
 #### SciTech Organization
 
 ##### SciTech Admin
 
-* **Username:**  fintech.admin
-* **Email:** fintech.admin@vcf.lab
+* **Username:** scitech.admin
+* **Email:** scitech.admin@vcf.lab
 * **Group Membership:**
   * SciTech-admins
-  * vcf-automation-org-owners
-  * vcf-automation-org-members
+  * SciTech-org-members
   * vcf-operations-users
 
-##### SciTech User
+##### SciTech User 01
 
-* **Username:**  scitech.user
-* **Email:** scitech.user@vcf.lab
+* **Username:** scitech.user01
+* **Email:** scitech.user01@vcf.lab
 * **Group Membership:**
   * SciTech-users
-  * vcf-automation-org-members
+  * SciTech-org-members
+  * vcf-operations-viewers
+
+##### SciTech User 02
+
+* **Username:** scitech.user02
+* **Email:** scitech.user02@vcf.lab
+* **Group Membership:**
+  * SciTech-users
+  * SciTech-org-members
+  * vcf-operations-viewers
+
+##### SciTech Developer 01
+
+* **Username:** scitech.dev01
+* **Email:** scitech.dev01@vcf.lab
+* **Group Membership:**
+  * SciTech-developers
+  * SciTech-org-members
+  * vcf-operations-viewers
+
+##### SciTech Developer 02
+
+* **Username:** scitech.dev02
+* **Email:** scitech.dev02@vcf.lab
+* **Group Membership:**
+  * SciTech-developers
+  * SciTech-org-members
+  * vcf-operations-viewers
+
+##### SciTech DevOps User 01
+
+* **Username:** scitech.devops01
+* **Email:** scitech.devops01@vcf.lab
+* **Group Membership:**
+  * SciTech-users
+  * SciTech-developers
+  * SciTech-org-members
+  * vcf-operations-viewers
+
+##### SciTech DevOps User 02
+
+* **Username:** scitech.devops02
+* **Email:** scitech.devops02@vcf.lab
+* **Group Membership:**
+  * SciTech-users
+  * SciTech-developers
+  * SciTech-org-members
+  * vcf-operations-viewers
+
+##### SciTech GitOps User
+
+* **Username:** scitech.gitops
+* **Email:** scitech.gitops@vcf.lab
+* **Group Membership:**
+  * SciTech-developers
+  * SciTech-org-members
   * vcf-operations-viewers
 
 ##### SciTech Approver
 
-* **Username:**  scitech.approver
+* **Username:** scitech.approver
 * **Email:** scitech.approver@vcf.lab
 * **Group Membership:**
-  * SciTech-users
-  * vcf-automation-org-members
+  * SciTech-org-members
   * vcf-operations-viewers
 
-##### SciTech Developer
+##### SciTech Support User
 
-* **Username:**  scitech.developer
-* **Email:** scitech.developer@vcf.lab
+* **Username:** scitech.support
+* **Email:** scitech.support@vcf.lab
 * **Group Membership:**
-  * SciTech-developers
-  * vcf-automation-org-members
+  * SciTech-support-users
+  * SciTech-org-members
+  * vcf-operations-viewers
+
+##### SciTech Manager
+
+* **Username:** scitech.manager
+* **Email:** scitech.manager@vcf.lab
+* **Group Membership:**
+  * SciTech-org-members
+  * vcf-operations-viewers
+
+##### SciTech Project Admin
+
+* **Username:** scitech.project
+* **Email:** scitech.project@vcf.lab
+* **Group Membership:**
+  * SciTech-org-members
   * vcf-operations-viewers
 
 #### MedTech Organization
 
 ##### MedTech Admin
 
-* **Username:**  fintech.admin
-* **Email:** fintech.admin@vcf.lab
+* **Username:** medtech.admin
+* **Email:** medtech.admin@vcf.lab
 * **Group Membership:**
   * MedTech-admins
-  * vcf-automation-org-owners
-  * vcf-automation-org-members
+  * MedTech-org-members
   * vcf-operations-users
 
-##### MedTech User
+##### MedTech User 01
 
-* **Username:**  medtech.user
-* **Email:** medtech.user@vcf.lab
+* **Username:** medtech.user01
+* **Email:** medtech.user01@vcf.lab
 * **Group Membership:**
   * MedTech-users
-  * vcf-automation-org-members
+  * MedTech-org-members
+  * vcf-operations-viewers
+
+##### MedTech User 02
+
+* **Username:** medtech.user02
+* **Email:** medtech.user02@vcf.lab
+* **Group Membership:**
+  * MedTech-users
+  * MedTech-org-members
+  * vcf-operations-viewers
+
+##### MedTech Developer 01
+
+* **Username:** medtech.dev01
+* **Email:** medtech.dev01@vcf.lab
+* **Group Membership:**
+  * MedTech-developers
+  * MedTech-org-members
+  * vcf-operations-viewers
+
+##### MedTech Developer 02
+
+* **Username:** medtech.dev02
+* **Email:** medtech.dev02@vcf.lab
+* **Group Membership:**
+  * MedTech-developers
+  * MedTech-org-members
+  * vcf-operations-viewers
+
+##### MedTech DevOps User 01
+
+* **Username:** medtech.devops01
+* **Email:** medtech.devops01@vcf.lab
+* **Group Membership:**
+  * MedTech-users
+  * MedTech-developers
+  * MedTech-org-members
+  * vcf-operations-viewers
+
+##### MedTech DevOps User 02
+
+* **Username:** medtech.devops02
+* **Email:** medtech.devops02@vcf.lab
+* **Group Membership:**
+  * MedTech-users
+  * MedTech-developers
+  * MedTech-org-members
+  * vcf-operations-viewers
+
+##### MedTech GitOps User
+
+* **Username:** medtech.gitops
+* **Email:** medtech.gitops@vcf.lab
+* **Group Membership:**
+  * MedTech-developers
+  * MedTech-org-members
   * vcf-operations-viewers
 
 ##### MedTech Approver
 
-* **Username:**  medtech.approver
+* **Username:** medtech.approver
 * **Email:** medtech.approver@vcf.lab
 * **Group Membership:**
-  * MedTech-users
-  * vcf-automation-org-members
+  * MedTech-org-members
   * vcf-operations-viewers
 
-##### MedTech Developer
+##### MedTech Support User
 
-* **Username:**  medtech.developer
-* **Email:** medtech.developer@vcf.lab
+* **Username:** medtech.support
+* **Email:** medtech.support@vcf.lab
 * **Group Membership:**
-  * MedTech-developers
-  * vcf-automation-org-members
+  * MedTech-support-users
+  * MedTech-org-members
+  * vcf-operations-viewers
+
+##### MedTech Manager
+
+* **Username:** medtech.manager
+* **Email:** medtech.manager@vcf.lab
+* **Group Membership:**
+  * MedTech-org-members
+  * vcf-operations-viewers
+
+##### MedTech Project Admin
+
+* **Username:** medtech.project
+* **Email:** medtech.project@vcf.lab
+* **Group Membership:**
+  * MedTech-org-members
   * vcf-operations-viewers

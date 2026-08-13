@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-tls-certs-cm
+  namespace: REPLACE-WITH-ELW-NAMESPACE
+data:
+  gitlab.vcf.lab: |
+    -----BEGIN CERTIFICATE-----
+    MIIDMzCCAhugAwIBAgIUL+27D2H2YrYIDguBYT+eKrPq/2swDQYJKoZIhvcNAQEL
+    BQAwITEfMB0GA1UEAxMWdmNmLmxhYiBSb290IEF1dGhvcml0eTAeFw0yNjAzMjcy
+    MTE1MDRaFw0zNjAzMjQyMTE1MzNaMCExHzAdBgNVBAMTFnZjZi5sYWIgUm9vdCBB
+    dXRob3JpdHkwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDaRjVLqzvl
+    js+VY694toAexrPhYSQlMwEn+rwQ+lut18Gtf8k238HPaIpLug3YmUq4esbzfUwS
+    u+iv6ovsHLG6rOBMs/5L0s90V8d5HewOtYvQrMccn9NphcHOmBGCAFn0bkf1dRW5
+    AIRqb2pkSTt0+ltzjA/tfLYHPZ+0pM9+8R7czoyEcy7p9T8t1Sddyopcvw8/sklo
+    aSIXWJnjh8nwkhuJ3nEUbfPV10TLtYWmRHOEvFZ8xgHBe42oxKYfCDAf9jbeGLGA
+    pE6+1/4Z1IZmxvmT7j+NY+rS6v2UllYlHrjw4T5ZG4WFj2fWBY6gAxMpW55lA1aJ
+    TM8toOhbfBm7AgMBAAGjYzBhMA4GA1UdDwEB/wQEAwIBBjAPBgNVHRMBAf8EBTAD
+    AQH/MB0GA1UdDgQWBBSbRXPV2WCEoBxFMqHzk8t26GDyPDAfBgNVHSMEGDAWgBSb
+    RXPV2WCEoBxFMqHzk8t26GDyPDANBgkqhkiG9w0BAQsFAAOCAQEAE4NmOOMfkTy2
+    BQbPSxb58/mPEC4ahK3Dv5B6UkYmlLzcqbwrOLajKON8EvSDT1D4/13nhkPPv/xb
+    miY6nNdR107s69btGhDu+wI599PElhW9g7ZESw5I4G5R6r1nsSVSUCx6fFAz1N2O
+    2NczVk44JaptAy+Cu7AJtgKKhv5jwp/rmdR/PEzvoX7wx6ReeI4OZ6hhlQkNxd4b
+    1M3JRQmQpL/+XKBzfSF/SwisQKlCylJ9wQCTTSjElgL+MmKH8aUkUDAYh+5jvxJY
+    T7RnIToZ7sQdg69FtmbzrBlW7x3tjcoCMgkbtlSj+XiucpoTP5Q+hwjdkzMlvFRX
+    pCHk9Tkcow==
+    -----END CERTIFICATE-----

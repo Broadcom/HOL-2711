@@ -1,0 +1,1 @@
+for i in {1..4}; do (cat <(yes | tr \\n x | head -c 16G) <(sleep 900) | grep n) & done

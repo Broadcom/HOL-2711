@@ -1,0 +1,6 @@
+apiVersion: project.cci.vmware.com/v1alpha2
+kind: Project
+metadata:
+  name: m9-demo-project
+spec:
+  description: HOL-2711-24 Module 9, created from the VCF CLI
