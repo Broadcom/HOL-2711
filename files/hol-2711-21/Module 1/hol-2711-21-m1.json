@@ -1,0 +1,118 @@
+{
+  "vcenter": {
+    "server": "vc-wld01-a.site-a.vcf.lab",
+    "ignore_certificate_errors": true,
+    "username": "administrator@wld.sso",
+    "password_file": "/home/holuser/Desktop/PASSWORD.txt"
+  },
+  "categories": [
+    {
+      "name": "os",
+      "description": "",
+      "cardinality": "Multiple",
+      "entity_types": [
+        "VMHost",
+        "VirtualMachine"
+      ],
+      "tags": [
+        {
+          "name": "linux",
+          "description": "Host running Linux OS VMs"
+        },
+        {
+          "name": "windows",
+          "description": "Host running Windows OS VMs"
+        }
+      ]
+    }
+  ],
+  "assignments": [
+    {
+      "type": "VMHost",
+      "name": "esx-05a.site-a.vcf.lab",
+      "tags": [
+        {
+          "category": "os",
+          "tag": "windows"
+        }
+      ]
+    },
+    {
+      "type": "VMHost",
+      "name": "esx-06a.site-a.vcf.lab",
+      "tags": [
+        {
+          "category": "os",
+          "tag": "linux"
+        }
+      ]
+    },
+    {
+      "type": "VMHost",
+      "name": "esx-07a.site-a.vcf.lab",
+      "tags": [
+        {
+          "category": "os",
+          "tag": "linux"
+        }
+      ]
+    },
+    {
+      "type": "VirtualMachine",
+      "name": "vm-scitech-001",
+      "tags": [
+        {
+          "category": "os",
+          "tag": "linux"
+        }
+      ]
+    }
+  ],
+  "policies": [
+    {
+      "name": "linux-vm-host-affinity",
+      "description": "This policy will keep Linux VMs on hosts licensed for it.",
+      "type": "vm-host-affinity",
+      "vm_tag": {
+        "category": "os",
+        "tag": "linux"
+      },
+      "host_tag": {
+        "category": "os",
+        "tag": "linux"
+      }
+    },
+    {
+      "name": "windows-vm-host-affinity",
+      "description": "This policy will keep Windows VMs on hosts licensed for it.",
+      "type": "vm-host-affinity",
+      "vm_tag": {
+        "category": "os",
+        "tag": "windows"
+      },
+      "host_tag": {
+        "category": "os",
+        "tag": "windows"
+      }
+    }
+  ],
+  "vcfa": {
+    "server": "auto-a.site-a.vcf.lab",
+    "api_token_file": "/home/holuser/Desktop/API Tokens/API-Provider.Admin-VCFA.txt",
+    "ignore_certificate_errors": true
+    },
+    "infrastructure_policies": [
+    {
+        "name": "linux",
+        "description": "Infrastructure Policy to place Linux workloads",
+        "vc_compute_policy_name": "linux-vm-host-affinity",
+        "is_mandatory": true
+    },
+    {
+        "name": "windows",
+        "description": "Infrastructure Policy to place Windows workloads",
+        "vc_compute_policy_name": "windows-vm-host-affinity",
+        "is_mandatory": true
+    }
+    ]
+}
