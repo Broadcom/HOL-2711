@@ -115,5 +115,66 @@
         "is_mandatory": true
     }
     ],
-    "tenants": []
+    "tenants": [
+      {
+        "name": "demo",
+        "display_name": "DemoTech",
+        "description": "DemoTech Tenant",
+        "isClassicTenant": false,
+        "isProviderConsumptionOrg": false,
+        "enabled": true,
+
+        "regional_quota": 
+        {
+          "region": "us-east-a",
+          "share_all": false,
+          "all_supervisors": true,
+          "supervisors" : [],
+          "capacity": 
+          {
+            "all_zones": false,
+            "zones": [
+              {
+                "zone": "z-wld-a",
+                "cpu_limit_GHz": 10,
+                "memory_limit_GB": 10,
+                "cpu_reservation_GHz": 1,
+                "memory_reservation_GB": 1
+              }
+            ]
+          }
+        },
+        "resources":
+        {
+          "vm_classes": {
+            "all_classes": true,
+            "classes": []
+          },
+          "storage_classes": {
+            "all_classes": true,
+            "classes": []
+          },
+          "infra_policies": {
+            "all_policies": true,
+            "policies": []
+          }
+        },
+        
+        "external_connection": 
+        { 
+          "distributed": true,
+          "name": "distributed-vlan-connection-wld-a",
+          "cluster": "vna-cluster-wld01-a"
+        },
+
+        "first_user":
+        {
+          "username": "admin",
+          "password_file": "/home/holuser/Desktop/PASSWORD.txt",
+          "provider_type": "LOCAL",
+          "enabled": true,
+          "role": "Organization Administrator"
+        }
+      }
+    ]
 }
