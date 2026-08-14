@@ -159,7 +159,14 @@
             "policies": []
           }
         },
-        "external_connection": "distributed-vlan-connection-wld-a",
+        
+        "external_connection": 
+        { 
+          "distributed": true,
+          "name": "distributed-vlan-connection-wld-a",
+          "cluster": "vna-cluster-wld01-a"
+        },
+
         "first_user":
         {
           "username": "admin",
