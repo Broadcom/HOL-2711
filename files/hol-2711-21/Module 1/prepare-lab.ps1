@@ -2,7 +2,7 @@
 
 param (
     [Parameter(Mandatory = $false)]
-    [string]$ConfigFile = "./compute-policies.json"
+    [string]$ConfigFile = "./hol-2711-21-m1.json"
 )
 
 Set-StrictMode -Version Latest
