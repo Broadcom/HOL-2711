@@ -49,8 +49,45 @@ function Write-Warn {
 
 
 # ============================================================
-# REST Error Helpers
+# Generic property helper
 # ============================================================
+
+function Test-Property {
+
+    param (
+        [object]$Object,
+        [string]$Name
+    )
+
+    return (
+        $null -ne $Object -and
+        $Object.PSObject.Properties.Name -contains $Name
+    )
+}
+
+
+# ============================================================
+# REST error helpers
+# ============================================================
+
+function Get-HttpStatusCode {
+
+    param (
+        [Parameter(Mandatory)]
+        $ErrorRecord
+    )
+
+    try {
+        if ($ErrorRecord.Exception.Response.StatusCode) {
+            return [int]$ErrorRecord.Exception.Response.StatusCode
+        }
+    }
+    catch {
+    }
+
+    return $null
+}
+
 
 function Get-RestErrorDetail {
 
@@ -72,27 +109,8 @@ function Get-RestErrorDetail {
 }
 
 
-function Get-HttpStatusCode {
-
-    param (
-        [Parameter(Mandatory)]
-        $ErrorRecord
-    )
-
-    try {
-        if ($ErrorRecord.Exception.Response.StatusCode) {
-            return [int]$ErrorRecord.Exception.Response.StatusCode
-        }
-    }
-    catch {
-    }
-
-    return $null
-}
-
-
 # ============================================================
-# Generic REST Helper
+# Generic REST helper
 # ============================================================
 
 function Invoke-ApiRest {
@@ -139,15 +157,17 @@ function Invoke-ApiRest {
         }
         else {
             $Params.Body = $Body |
-                ConvertTo-Json -Depth 30
+                ConvertTo-Json -Depth 50
         }
     }
 
-    $Command = Get-Command Invoke-RestMethod
+    $IRM = Get-Command Invoke-RestMethod
 
     if (
         $IgnoreCertificateErrors -and
-        $Command.Parameters.ContainsKey("SkipCertificateCheck")
+        $IRM.Parameters.ContainsKey(
+            "SkipCertificateCheck"
+        )
     ) {
         $Params.SkipCertificateCheck = $true
     }
@@ -157,16 +177,13 @@ function Invoke-ApiRest {
 
 
 # ============================================================
-# Resolve File Relative To JSON
+# Resolve file relative to config
 # ============================================================
 
 function Resolve-ConfigFilePath {
 
     param (
-        [Parameter(Mandatory)]
         [string]$Path,
-
-        [Parameter(Mandatory)]
         [string]$ConfigDirectory
     )
 
@@ -181,21 +198,78 @@ function Resolve-ConfigFilePath {
 
 
 # ============================================================
-# vCenter REST Authentication
+# Generic VCFA paged query
+# ============================================================
+
+function Get-VcfaPagedValues {
+
+    param (
+        [string]$Server,
+        [string]$Path,
+        [System.Collections.IDictionary]$Headers,
+        [int]$PageSize = 128,
+        [bool]$IgnoreCertificateErrors = $false
+    )
+
+    $Values = @()
+    $Page = 1
+
+    do {
+
+        $Separator = "?"
+
+        if ($Path.Contains("?")) {
+            $Separator = "&"
+        }
+
+        $Uri = (
+            "https://$Server$Path" +
+            "${Separator}page=$Page&pageSize=$PageSize"
+        )
+
+        $Result = Invoke-ApiRest `
+            -Uri $Uri `
+            -Method GET `
+            -Headers $Headers `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors
+
+        if (
+            $Result -and
+            (Test-Property $Result "values") -and
+            $Result.values
+        ) {
+            $Values += @($Result.values)
+        }
+
+        $PageCount = 1
+
+        if (
+            $Result -and
+            (Test-Property $Result "pageCount") -and
+            $Result.pageCount
+        ) {
+            $PageCount = [int]$Result.pageCount
+        }
+
+        $Page++
+
+    } while ($Page -le $PageCount)
+
+    return $Values
+}
+
+
+# ============================================================
+# vCenter REST authentication
 # ============================================================
 
 function New-VCenterRestSession {
 
     param (
-        [Parameter(Mandatory)]
         [string]$Server,
-
-        [Parameter(Mandatory)]
         [string]$Username,
-
-        [Parameter(Mandatory)]
         [string]$Password,
-
         [bool]$IgnoreCertificateErrors = $false
     )
 
@@ -208,7 +282,10 @@ function New-VCenterRestSession {
     $Basic = [Convert]::ToBase64String($Bytes)
 
     $AuthHeaders =
-        [System.Collections.Generic.Dictionary[string,string]]::new()
+        [System.Collections.Generic.Dictionary[
+            string,
+            string
+        ]]::new()
 
     $AuthHeaders.Add(
         "Authorization",
@@ -219,7 +296,8 @@ function New-VCenterRestSession {
         -Uri "https://$Server/api/session" `
         -Method POST `
         -Headers $AuthHeaders `
-        -IgnoreCertificateErrors $IgnoreCertificateErrors
+        -IgnoreCertificateErrors `
+            $IgnoreCertificateErrors
 
     if (
         [string]::IsNullOrWhiteSpace(
@@ -230,7 +308,10 @@ function New-VCenterRestSession {
     }
 
     $Headers =
-        [System.Collections.Generic.Dictionary[string,string]]::new()
+        [System.Collections.Generic.Dictionary[
+            string,
+            string
+        ]]::new()
 
     $Headers.Add(
         "vmware-api-session-id",
@@ -248,11 +329,10 @@ function New-VCenterRestSession {
 function Get-ExactTagCategory {
 
     param (
-        [Parameter(Mandatory)]
         [string]$Name
     )
 
-    Get-TagCategory |
+    return Get-TagCategory |
         Where-Object {
             $_.Name -eq $Name
         } |
@@ -263,9 +343,7 @@ function Get-ExactTagCategory {
 function Get-OrCreateTagCategory {
 
     param (
-        [Parameter(Mandatory)]
         [string]$Name,
-
         [string]$Description = "",
 
         [ValidateSet(
@@ -277,19 +355,22 @@ function Get-OrCreateTagCategory {
         [string[]]$EntityTypes
     )
 
-    $Category = Get-ExactTagCategory `
-        -Name $Name
+    $Category =
+        Get-ExactTagCategory `
+            -Name $Name
 
     if ($Category) {
 
-        Write-Skip "Category '$Name' already exists"
+        Write-Skip (
+            "Category '$Name' already exists"
+        )
 
         return $Category
     }
 
     Write-Create "Category '$Name'"
 
-    $Parameters = @{
+    $Params = @{
         Name        = $Name
         Description = $Description
         Cardinality = $Cardinality
@@ -299,28 +380,26 @@ function Get-OrCreateTagCategory {
         $EntityTypes -and
         $EntityTypes.Count -gt 0
     ) {
-        $Parameters.EntityType = $EntityTypes
+        $Params.EntityType =
+            $EntityTypes
     }
 
-    return New-TagCategory @Parameters
+    return New-TagCategory @Params
 }
 
 
 # ============================================================
-# Tag
+# Tags
 # ============================================================
 
 function Get-ExactTag {
 
     param (
-        [Parameter(Mandatory)]
         [string]$CategoryName,
-
-        [Parameter(Mandatory)]
         [string]$TagName
     )
 
-    Get-Tag |
+    return Get-Tag |
         Where-Object {
             $_.Name -eq $TagName -and
             $_.Category.Name -eq $CategoryName
@@ -332,18 +411,15 @@ function Get-ExactTag {
 function Get-OrCreateTag {
 
     param (
-        [Parameter(Mandatory)]
         [string]$Name,
-
-        [Parameter(Mandatory)]
         $Category,
-
         [string]$Description = ""
     )
 
-    $Tag = Get-ExactTag `
-        -CategoryName $Category.Name `
-        -TagName $Name
+    $Tag =
+        Get-ExactTag `
+            -CategoryName $Category.Name `
+            -TagName $Name
 
     if ($Tag) {
 
@@ -366,16 +442,13 @@ function Get-OrCreateTag {
 
 
 # ============================================================
-# vSphere Object Lookup
+# vSphere object lookup
 # ============================================================
 
 function Get-vSphereObject {
 
     param (
-        [Parameter(Mandatory)]
         [string]$Type,
-
-        [Parameter(Mandatory)]
         [string]$Name
     )
 
@@ -442,32 +515,33 @@ function Get-vSphereObject {
         }
 
         default {
-            throw "Unsupported object type '$Type'"
+            throw (
+                "Unsupported object type '$Type'"
+            )
         }
     }
 }
 
 
 # ============================================================
-# Assign Tag Only If Missing
+# Tag assignment
 # ============================================================
 
 function Set-TagIfMissing {
 
     param (
-        [Parameter(Mandatory)]
         $Entity,
-
-        [Parameter(Mandatory)]
         $Tag
     )
 
-    $Existing = Get-TagAssignment `
-        -Entity $Entity `
-        -ErrorAction SilentlyContinue |
+    $Existing =
+        Get-TagAssignment `
+            -Entity $Entity `
+            -ErrorAction SilentlyContinue |
         Where-Object {
             $_.Tag.Name -eq $Tag.Name -and
-            $_.Tag.Category.Name -eq $Tag.Category.Name
+            $_.Tag.Category.Name -eq
+                $Tag.Category.Name
         } |
         Select-Object -First 1
 
@@ -482,8 +556,8 @@ function Set-TagIfMissing {
     }
 
     Write-Create (
-        "Assign '$($Tag.Category.Name)/$($Tag.Name)' " +
-        "to '$($Entity.Name)'"
+        "Assign '$($Tag.Category.Name)/" +
+        "$($Tag.Name)' to '$($Entity.Name)'"
     )
 
     New-TagAssignment `
@@ -500,25 +574,25 @@ function Set-TagIfMissing {
 function Get-RestCategoryId {
 
     param (
-        [Parameter(Mandatory)]
         [string]$Server,
-
-        [Parameter(Mandatory)]
         [System.Collections.IDictionary]$Headers,
-
-        [Parameter(Mandatory)]
         [string]$CategoryName,
-
         [bool]$IgnoreCertificateErrors = $false
     )
 
-    $Result = Invoke-ApiRest `
-        -Uri "https://$Server/api/vcenter/tagging/categories" `
-        -Method GET `
-        -Headers $Headers `
-        -IgnoreCertificateErrors $IgnoreCertificateErrors
+    $Result =
+        Invoke-ApiRest `
+            -Uri (
+                "https://$Server/api/vcenter/" +
+                "tagging/categories"
+            ) `
+            -Method GET `
+            -Headers $Headers `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors
 
-    $Category = $Result.items |
+    $Category =
+        $Result.items |
         Where-Object {
             $_.info.name -eq $CategoryName
         } |
@@ -527,8 +601,7 @@ function Get-RestCategoryId {
     if (-not $Category) {
 
         throw (
-            "Unable to locate REST category " +
-            "'$CategoryName'"
+            "REST category '$CategoryName' not found."
         )
     }
 
@@ -543,34 +616,34 @@ function Get-RestCategoryId {
 function Get-RestTagId {
 
     param (
-        [Parameter(Mandatory)]
         [string]$Server,
-
-        [Parameter(Mandatory)]
         [System.Collections.IDictionary]$Headers,
-
-        [Parameter(Mandatory)]
         [string]$CategoryName,
-
-        [Parameter(Mandatory)]
         [string]$TagName,
-
         [bool]$IgnoreCertificateErrors = $false
     )
 
-    $CategoryId = Get-RestCategoryId `
-        -Server $Server `
-        -Headers $Headers `
-        -CategoryName $CategoryName `
-        -IgnoreCertificateErrors $IgnoreCertificateErrors
+    $CategoryId =
+        Get-RestCategoryId `
+            -Server $Server `
+            -Headers $Headers `
+            -CategoryName $CategoryName `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors
 
-    $Result = Invoke-ApiRest `
-        -Uri "https://$Server/api/vcenter/tagging/tags" `
-        -Method GET `
-        -Headers $Headers `
-        -IgnoreCertificateErrors $IgnoreCertificateErrors
+    $Result =
+        Invoke-ApiRest `
+            -Uri (
+                "https://$Server/api/vcenter/" +
+                "tagging/tags"
+            ) `
+            -Method GET `
+            -Headers $Headers `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors
 
-    $Tag = $Result.items |
+    $Tag =
+        $Result.items |
         Where-Object {
             $_.info.name -eq $TagName -and
             $_.info.category -eq $CategoryId
@@ -580,8 +653,7 @@ function Get-RestTagId {
     if (-not $Tag) {
 
         throw (
-            "Unable to locate REST tag " +
-            "'$CategoryName/$TagName'"
+            "REST tag '$CategoryName/$TagName' not found."
         )
     }
 
@@ -590,31 +662,30 @@ function Get-RestTagId {
 
 
 # ============================================================
-# vCenter Compute Policy Lookup
+# vCenter Compute Policies
 # ============================================================
 
 function Get-RestComputePolicy {
 
     param (
-        [Parameter(Mandatory)]
         [string]$Server,
-
-        [Parameter(Mandatory)]
         [System.Collections.IDictionary]$Headers,
-
-        [Parameter(Mandatory)]
         [string]$Name,
-
         [bool]$IgnoreCertificateErrors = $false
     )
 
-    $Result = Invoke-ApiRest `
-        -Uri "https://$Server/api/vcenter/compute/policies" `
-        -Method GET `
-        -Headers $Headers `
-        -IgnoreCertificateErrors $IgnoreCertificateErrors
+    $Policies =
+        Invoke-ApiRest `
+            -Uri (
+                "https://$Server/api/vcenter/" +
+                "compute/policies"
+            ) `
+            -Method GET `
+            -Headers $Headers `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors
 
-    return $Result |
+    return $Policies |
         Where-Object {
             $_.name -eq $Name
         } |
@@ -622,20 +693,12 @@ function Get-RestComputePolicy {
 }
 
 
-# ============================================================
-# Compute Policy Capability
-# ============================================================
-
 function Get-RestComputePolicyCapability {
 
     param (
-        [Parameter(Mandatory)]
         [string]$Server,
-
-        [Parameter(Mandatory)]
         [System.Collections.IDictionary]$Headers,
 
-        [Parameter(Mandatory)]
         [ValidateSet(
             "vm-host-affinity",
             "vm-host-anti-affinity"
@@ -645,22 +708,26 @@ function Get-RestComputePolicyCapability {
         [bool]$IgnoreCertificateErrors = $false
     )
 
-    $Capabilities = Invoke-ApiRest `
-        -Uri (
-            "https://$Server/api/vcenter/" +
-            "compute/policies/capabilities"
-        ) `
-        -Method GET `
-        -Headers $Headers `
-        -IgnoreCertificateErrors $IgnoreCertificateErrors
+    $Capabilities =
+        Invoke-ApiRest `
+            -Uri (
+                "https://$Server/api/vcenter/" +
+                "compute/policies/capabilities"
+            ) `
+            -Method GET `
+            -Headers $Headers `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors
 
     switch ($Type) {
 
         "vm-host-affinity" {
 
-            $Capability = $Capabilities |
+            $Capability =
+                $Capabilities |
                 Where-Object {
-                    $_.capability -match "VmHostAffinity" -or
+                    $_.capability -match
+                        "VmHostAffinity" -or
                     (
                         $_.name -match "host" -and
                         $_.name -match "affinity" -and
@@ -672,9 +739,11 @@ function Get-RestComputePolicyCapability {
 
         "vm-host-anti-affinity" {
 
-            $Capability = $Capabilities |
+            $Capability =
+                $Capabilities |
                 Where-Object {
-                    $_.capability -match "VmHostAntiAffinity" -or
+                    $_.capability -match
+                        "VmHostAntiAffinity" -or
                     (
                         $_.name -match "host" -and
                         $_.name -match "anti"
@@ -686,17 +755,8 @@ function Get-RestComputePolicyCapability {
 
     if (-not $Capability) {
 
-        Write-Warn "Available compute policy capabilities:"
-
-        $Capabilities |
-            Select-Object `
-                capability,
-                name,
-                description |
-            Format-Table -AutoSize
-
         throw (
-            "Unable to locate compute policy capability '$Type'"
+            "Compute policy capability '$Type' not found."
         )
     }
 
@@ -704,30 +764,22 @@ function Get-RestComputePolicyCapability {
 }
 
 
-# ============================================================
-# Create vCenter Compute Policy If Missing
-# ============================================================
-
 function New-RestComputePolicyIfMissing {
 
     param (
-        [Parameter(Mandatory)]
         [string]$Server,
-
-        [Parameter(Mandatory)]
         [System.Collections.IDictionary]$Headers,
-
-        [Parameter(Mandatory)]
         $Policy,
-
         [bool]$IgnoreCertificateErrors = $false
     )
 
-    $Existing = Get-RestComputePolicy `
-        -Server $Server `
-        -Headers $Headers `
-        -Name $Policy.name `
-        -IgnoreCertificateErrors $IgnoreCertificateErrors
+    $Existing =
+        Get-RestComputePolicy `
+            -Server $Server `
+            -Headers $Headers `
+            -Name $Policy.name `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors
 
     if ($Existing) {
 
@@ -739,29 +791,31 @@ function New-RestComputePolicyIfMissing {
         return
     }
 
-    $VMTagId = Get-RestTagId `
-        -Server $Server `
-        -Headers $Headers `
-        -CategoryName $Policy.vm_tag.category `
-        -TagName $Policy.vm_tag.tag `
-        -IgnoreCertificateErrors $IgnoreCertificateErrors
+    $VMTagId =
+        Get-RestTagId `
+            -Server $Server `
+            -Headers $Headers `
+            -CategoryName $Policy.vm_tag.category `
+            -TagName $Policy.vm_tag.tag `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors
 
-    $HostTagId = Get-RestTagId `
-        -Server $Server `
-        -Headers $Headers `
-        -CategoryName $Policy.host_tag.category `
-        -TagName $Policy.host_tag.tag `
-        -IgnoreCertificateErrors $IgnoreCertificateErrors
+    $HostTagId =
+        Get-RestTagId `
+            -Server $Server `
+            -Headers $Headers `
+            -CategoryName $Policy.host_tag.category `
+            -TagName $Policy.host_tag.tag `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors
 
-    $Capability = Get-RestComputePolicyCapability `
-        -Server $Server `
-        -Headers $Headers `
-        -Type $Policy.type `
-        -IgnoreCertificateErrors $IgnoreCertificateErrors
-
-    Write-Info (
-        "Using capability '$($Capability.name)'"
-    )
+    $Capability =
+        Get-RestComputePolicyCapability `
+            -Server $Server `
+            -Headers $Headers `
+            -Type $Policy.type `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors
 
     $Body = [ordered]@{
         capability  = $Capability.capability
@@ -771,78 +825,39 @@ function New-RestComputePolicyIfMissing {
         host_tag    = $HostTagId
     }
 
-    if (
-        $Policy.PSObject.Properties.Name `
-            -contains "strictness"
-    ) {
-        $Body.strictness = $Policy.strictness
-    }
-
     Write-Create (
         "vCenter compute policy '$($Policy.name)'"
     )
 
-    try {
-
-        $Result = Invoke-ApiRest `
-            -Uri (
-                "https://$Server/api/vcenter/compute/policies"
-            ) `
-            -Method POST `
-            -Headers $Headers `
-            -Body $Body `
-            -IgnoreCertificateErrors $IgnoreCertificateErrors
-
-        Write-Host (
-            "[CREATED] vCenter compute policy " +
-            "'$($Policy.name)' ID=$Result"
-        ) -ForegroundColor Green
-    }
-    catch {
-
-        $Status = Get-HttpStatusCode $_
-
-        Write-Host ""
-        Write-Host (
-            "vCenter compute policy creation failed"
-        ) -ForegroundColor Red
-
-        Write-Host "Policy: $($Policy.name)"
-        Write-Host "HTTP:   $Status"
-
-        Write-Host ""
-        Write-Host (
-            Get-RestErrorDetail $_
-        )
-
-        if ($Status -eq 403) {
-
-            Write-Warn (
-                "vCenter denied the request. " +
-                "Check ComputePolicy.Manage privileges."
-            )
-        }
-
-        throw
-    }
+    Invoke-ApiRest `
+        -Uri (
+            "https://$Server/api/vcenter/" +
+            "compute/policies"
+        ) `
+        -Method POST `
+        -Headers $Headers `
+        -Body $Body `
+        -IgnoreCertificateErrors `
+            $IgnoreCertificateErrors |
+        Out-Null
 }
 
 
 # ============================================================
-# Read VCFA API / Refresh Token
+# VCFA authentication
 # ============================================================
 
 function Get-VcfaApiToken {
 
     param (
-        [Parameter(Mandatory)]
         [string]$TokenFile
     )
 
     if (-not (Test-Path $TokenFile)) {
 
         throw (
-            "VCFA API token file not found: $TokenFile"
+            "VCFA API token file not found: " +
+            "$TokenFile"
         )
     }
 
@@ -852,51 +867,33 @@ function Get-VcfaApiToken {
             -Raw
     ).Trim()
 
-    if ([string]::IsNullOrWhiteSpace($Raw)) {
-
-        throw (
-            "VCFA API token file is empty: $TokenFile"
-        )
-    }
-
     if ($Raw.StartsWith("{")) {
 
-        $Object = $Raw |
+        $Object =
+            $Raw |
             ConvertFrom-Json
 
-        if (
-            $Object.PSObject.Properties.Name `
-                -contains "refresh_token"
+        foreach (
+            $Property in @(
+                "refresh_token",
+                "api_token",
+                "token"
+            )
         ) {
 
-            return (
-                [string]$Object.refresh_token
-            ).Trim()
-        }
+            if (
+                $Object.PSObject.Properties.Name `
+                    -contains $Property
+            ) {
 
-        if (
-            $Object.PSObject.Properties.Name `
-                -contains "api_token"
-        ) {
-
-            return (
-                [string]$Object.api_token
-            ).Trim()
-        }
-
-        if (
-            $Object.PSObject.Properties.Name `
-                -contains "token"
-        ) {
-
-            return (
-                [string]$Object.token
-            ).Trim()
+                return (
+                    [string]$Object.$Property
+                ).Trim()
+            }
         }
 
         throw (
-            "VCFA token JSON must contain " +
-            "refresh_token, api_token or token."
+            "VCFA token JSON contains no supported token."
         )
     }
 
@@ -904,19 +901,11 @@ function Get-VcfaApiToken {
 }
 
 
-# ============================================================
-# Exchange VCFA API Token For Access Token
-# ============================================================
-
 function Get-VcfaAccessToken {
 
     param (
-        [Parameter(Mandatory)]
         [string]$Server,
-
-        [Parameter(Mandatory)]
         [string]$ApiToken,
-
         [bool]$IgnoreCertificateErrors = $false
     )
 
@@ -924,31 +913,27 @@ function Get-VcfaAccessToken {
         "Exchanging VCFA API token for bearer token"
     )
 
-    $Uri = (
-        "https://$Server/oauth/provider/token"
-    )
-
-    $EncodedToken = [uri]::EscapeDataString(
-        $ApiToken
-    )
-
     $Body = (
-        "grant_type=refresh_token" +
-        "&refresh_token=$EncodedToken"
+        "grant_type=refresh_token&refresh_token=" +
+        [uri]::EscapeDataString($ApiToken)
     )
 
     $Headers =
-        [System.Collections.Generic.Dictionary[string,string]]::new()
+        [System.Collections.Generic.Dictionary[
+            string,
+            string
+        ]]::new()
 
     $Headers.Add(
         "Accept",
         "application/json"
     )
 
-    try {
-
-        $Result = Invoke-ApiRest `
-            -Uri $Uri `
+    $Result =
+        Invoke-ApiRest `
+            -Uri (
+                "https://$Server/oauth/provider/token"
+            ) `
             -Method POST `
             -Headers $Headers `
             -Body $Body `
@@ -956,62 +941,11 @@ function Get-VcfaAccessToken {
                 "application/x-www-form-urlencoded" `
             -IgnoreCertificateErrors `
                 $IgnoreCertificateErrors
-    }
-    catch {
 
-        $Status = Get-HttpStatusCode $_
-
-        Write-Host ""
-        Write-Host (
-            "VCFA API token exchange failed"
-        ) -ForegroundColor Red
-
-        Write-Host "Endpoint: $Uri"
-        Write-Host "HTTP:     $Status"
-
-        Write-Host ""
-        Write-Host (
-            Get-RestErrorDetail $_
-        )
-
-        throw
-    }
-
-    if (
-        -not (
-            $Result.PSObject.Properties.Name `
-                -contains "access_token"
-        )
-    ) {
+    if (-not $Result.access_token) {
 
         throw (
-            "VCFA token response did not contain access_token."
-        )
-    }
-
-    if (
-        [string]::IsNullOrWhiteSpace(
-            [string]$Result.access_token
-        )
-    ) {
-
-        throw (
-            "VCFA returned an empty access_token."
-        )
-    }
-
-    Write-Info (
-        "VCFA bearer token obtained successfully"
-    )
-
-    if (
-        $Result.PSObject.Properties.Name `
-            -contains "expires_in"
-    ) {
-
-        Write-Info (
-            "VCFA token lifetime: " +
-            "$($Result.expires_in) seconds"
+            "VCFA access token was not returned."
         )
     }
 
@@ -1019,19 +953,17 @@ function Get-VcfaAccessToken {
 }
 
 
-# ============================================================
-# VCFA Request Headers
-# ============================================================
-
 function New-VcfaHeaders {
 
     param (
-        [Parameter(Mandatory)]
         [string]$AccessToken
     )
 
     $Headers =
-        [System.Collections.Generic.Dictionary[string,string]]::new()
+        [System.Collections.Generic.Dictionary[
+            string,
+            string
+        ]]::new()
 
     $Headers.Add(
         "Authorization",
@@ -1047,124 +979,75 @@ function New-VcfaHeaders {
 }
 
 
+function New-VcfaTenantHeaders {
+
+    param (
+        [System.Collections.IDictionary]$Headers,
+        [string]$OrgId
+    )
+
+    $Result =
+        [System.Collections.Generic.Dictionary[
+            string,
+            string
+        ]]::new()
+
+    foreach ($Key in $Headers.Keys) {
+
+        $Result.Add(
+            [string]$Key,
+            [string]$Headers[$Key]
+        )
+    }
+
+    $Result[
+        "X-VMWARE-VCLOUD-TENANT-CONTEXT"
+    ] = $OrgId
+
+    return $Result
+}
+
+
 # ============================================================
-# Get VCFA Infrastructure Policies
+# VCFA Infrastructure Policies
 # ============================================================
 
 function Get-VcfaInfrastructurePolicies {
 
     param (
-        [Parameter(Mandatory)]
         [string]$Server,
-
-        [Parameter(Mandatory)]
         [System.Collections.IDictionary]$Headers,
-
         [bool]$IgnoreCertificateErrors = $false
     )
 
-    $Policies = @()
-    $Page = 1
-    $PageSize = 128
-
-    do {
-
-        $Result = Invoke-ApiRest `
-            -Uri (
-                "https://$Server/cloudapi/v1/infraPolicies" +
-                "?page=$Page&pageSize=$PageSize"
-            ) `
-            -Method GET `
-            -Headers $Headers `
-            -IgnoreCertificateErrors `
-                $IgnoreCertificateErrors
-
-        if ($Result.values) {
-            $Policies += @(
-                $Result.values
-            )
-        }
-
-        $Page++
-
-    } while (
-        $Result.pageCount -gt 0 -and
-        $Page -le $Result.pageCount
-    )
-
-    return $Policies
-}
-
-
-# ============================================================
-# Find VCFA Infrastructure Policy
-# ============================================================
-
-function Get-VcfaInfrastructurePolicy {
-
-    param (
-        [Parameter(Mandatory)]
-        [string]$Server,
-
-        [Parameter(Mandatory)]
-        [System.Collections.IDictionary]$Headers,
-
-        [Parameter(Mandatory)]
-        [string]$Name,
-
-        [bool]$IgnoreCertificateErrors = $false
-    )
-
-    $Policies = Get-VcfaInfrastructurePolicies `
+    return Get-VcfaPagedValues `
         -Server $Server `
+        -Path "/cloudapi/v1/infraPolicies" `
         -Headers $Headers `
-        -IgnoreCertificateErrors $IgnoreCertificateErrors
-
-    return $Policies |
-        Where-Object {
-            $_.name -eq $Name
-        } |
-        Select-Object -First 1
+        -IgnoreCertificateErrors `
+            $IgnoreCertificateErrors
 }
 
-
-# ============================================================
-# Create VCFA Infrastructure Policy If Missing
-# ============================================================
 
 function New-VcfaInfrastructurePolicyIfMissing {
 
     param (
-        [Parameter(Mandatory)]
         [string]$Server,
-
-        [Parameter(Mandatory)]
         [System.Collections.IDictionary]$Headers,
-
-        [Parameter(Mandatory)]
         $Policy,
-
         [bool]$IgnoreCertificateErrors = $false
     )
 
-    if (
-        $Policy.name.Length -gt 63 -or
-        $Policy.name -notmatch `
-            '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
-    ) {
-
-        throw (
-            "Invalid VCFA infrastructure policy name " +
-            "'$($Policy.name)'"
-        )
-    }
-
-    $Existing = Get-VcfaInfrastructurePolicy `
-        -Server $Server `
-        -Headers $Headers `
-        -Name $Policy.name `
-        -IgnoreCertificateErrors `
-            $IgnoreCertificateErrors
+    $Existing =
+        Get-VcfaInfrastructurePolicies `
+            -Server $Server `
+            -Headers $Headers `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors |
+        Where-Object {
+            $_.name -eq $Policy.name
+        } |
+        Select-Object -First 1
 
     if ($Existing) {
 
@@ -1173,7 +1056,7 @@ function New-VcfaInfrastructurePolicyIfMissing {
             "'$($Policy.name)' already exists"
         )
 
-        return
+        return $Existing
     }
 
     $Body = [ordered]@{
@@ -1181,123 +1064,1296 @@ function New-VcfaInfrastructurePolicyIfMissing {
     }
 
     if (
-        $Policy.PSObject.Properties.Name `
-            -contains "description"
+        Test-Property $Policy "description"
     ) {
 
-        if (
-            -not [string]::IsNullOrWhiteSpace(
-                [string]$Policy.description
-            )
-        ) {
-            $Body.description =
-                $Policy.description
-        }
+        $Body.description =
+            $Policy.description
     }
 
     if (
-        $Policy.PSObject.Properties.Name `
-            -contains "vc_compute_policy_name"
+        Test-Property `
+            $Policy `
+            "vc_compute_policy_name"
     ) {
 
-        if (
-            -not [string]::IsNullOrWhiteSpace(
-                [string]$Policy.vc_compute_policy_name
-            )
-        ) {
-            $Body.vcComputePolicyName =
-                $Policy.vc_compute_policy_name
-        }
+        $Body.vcComputePolicyName =
+            $Policy.vc_compute_policy_name
     }
 
     if (
-        $Policy.PSObject.Properties.Name `
-            -contains "is_mandatory"
+        Test-Property `
+            $Policy `
+            "is_mandatory"
     ) {
 
         $Body.isMandatory =
             [bool]$Policy.is_mandatory
     }
 
+    Write-Create (
+        "VCFA infrastructure policy '$($Policy.name)'"
+    )
+
+    Invoke-ApiRest `
+        -Uri (
+            "https://$Server/cloudapi/v1/" +
+            "infraPolicies"
+        ) `
+        -Method POST `
+        -Headers $Headers `
+        -Body $Body `
+        -IgnoreCertificateErrors `
+            $IgnoreCertificateErrors |
+        Out-Null
+}
+
+
+# ============================================================
+# VCFA Tenants
+# ============================================================
+
+function Get-VcfaTenants {
+
+    param (
+        [string]$Server,
+        [System.Collections.IDictionary]$Headers,
+        [bool]$IgnoreCertificateErrors = $false
+    )
+
+    return Get-VcfaPagedValues `
+        -Server $Server `
+        -Path "/cloudapi/1.0.0/orgs" `
+        -Headers $Headers `
+        -IgnoreCertificateErrors `
+            $IgnoreCertificateErrors
+}
+
+
+function Get-VcfaTenant {
+
+    param (
+        [string]$Server,
+        [System.Collections.IDictionary]$Headers,
+        [string]$Name,
+        [bool]$IgnoreCertificateErrors = $false
+    )
+
+    return Get-VcfaTenants `
+        -Server $Server `
+        -Headers $Headers `
+        -IgnoreCertificateErrors `
+            $IgnoreCertificateErrors |
+        Where-Object {
+            $_.name -eq $Name
+        } |
+        Select-Object -First 1
+}
+
+
+function Wait-VcfaTenantReady {
+
+    param (
+        [string]$Server,
+        [System.Collections.IDictionary]$Headers,
+        [string]$Name,
+        [bool]$IgnoreCertificateErrors = $false
+    )
+
+    for ($i = 0; $i -lt 60; $i++) {
+
+        $Tenant =
+            Get-VcfaTenant `
+                -Server $Server `
+                -Headers $Headers `
+                -Name $Name `
+                -IgnoreCertificateErrors `
+                    $IgnoreCertificateErrors
+
+        if ($Tenant) {
+
+            if (
+                -not (
+                    Test-Property `
+                        $Tenant `
+                        "creationStatus"
+                ) -or
+                $Tenant.creationStatus -eq "READY"
+            ) {
+                return $Tenant
+            }
+
+            if (
+                $Tenant.creationStatus -in @(
+                    "ERROR",
+                    "FAILED_CREATION",
+                    "CONFLICT"
+                )
+            ) {
+
+                throw (
+                    "Tenant '$Name' creation failed: " +
+                    "$($Tenant.creationStatus)"
+                )
+            }
+        }
+
+        Start-Sleep -Seconds 2
+    }
+
+    throw (
+        "Timed out waiting for tenant '$Name'."
+    )
+}
+
+
+function Get-OrCreateVcfaTenant {
+
+    param (
+        [string]$Server,
+        [System.Collections.IDictionary]$Headers,
+        $Tenant,
+        [bool]$IgnoreCertificateErrors = $false
+    )
+
+    $Existing =
+        Get-VcfaTenant `
+            -Server $Server `
+            -Headers $Headers `
+            -Name $Tenant.name `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors
+
+    if ($Existing) {
+
+        Write-Skip (
+            "VCFA tenant '$($Tenant.name)' already exists"
+        )
+
+        return $Existing
+    }
+
+    $DisplayName =
+        $Tenant.name
+
     if (
-        $Policy.PSObject.Properties.Name `
-            -contains "policy_rule"
+        Test-Property `
+            $Tenant `
+            "display_name"
     ) {
 
-        if ($null -ne $Policy.policy_rule) {
-            $Body.policyRule =
-                $Policy.policy_rule
-        }
+        $DisplayName =
+            $Tenant.display_name
+    }
+
+    $Body = [ordered]@{
+        name        = $Tenant.name
+        displayName = $DisplayName
     }
 
     if (
-        $Policy.PSObject.Properties.Name `
-            -contains "compatible_region_zones"
+        Test-Property `
+            $Tenant `
+            "description"
     ) {
 
+        $Body.description =
+            $Tenant.description
+    }
+
+    if (
+        Test-Property `
+            $Tenant `
+            "enabled"
+    ) {
+
+        $Body.isEnabled =
+            [bool]$Tenant.enabled
+    }
+
+    if (
+        Test-Property `
+            $Tenant `
+            "isClassicTenant"
+    ) {
+
+        $Body.isClassicTenant =
+            [bool]$Tenant.isClassicTenant
+    }
+
+    if (
+        Test-Property `
+            $Tenant `
+            "isProviderConsumptionOrg"
+    ) {
+
+        $Body.isProviderConsumptionOrg =
+            [bool]$Tenant.isProviderConsumptionOrg
+    }
+
+    Write-Create (
+        "VCFA tenant '$($Tenant.name)'"
+    )
+
+    Invoke-ApiRest `
+        -Uri (
+            "https://$Server/cloudapi/1.0.0/orgs"
+        ) `
+        -Method POST `
+        -Headers $Headers `
+        -Body $Body `
+        -IgnoreCertificateErrors `
+            $IgnoreCertificateErrors |
+        Out-Null
+
+    return Wait-VcfaTenantReady `
+        -Server $Server `
+        -Headers $Headers `
+        -Name $Tenant.name `
+        -IgnoreCertificateErrors `
+            $IgnoreCertificateErrors
+}
+
+
+# ============================================================
+# Regions
+# ============================================================
+
+function Get-VcfaRegions {
+
+    param (
+        [string]$Server,
+        [System.Collections.IDictionary]$Headers,
+        [bool]$IgnoreCertificateErrors = $false
+    )
+
+    return Get-VcfaPagedValues `
+        -Server $Server `
+        -Path "/cloudapi/v1/regions" `
+        -Headers $Headers `
+        -IgnoreCertificateErrors `
+            $IgnoreCertificateErrors
+}
+
+
+function Get-VcfaRegion {
+
+    param (
+        [string]$Server,
+        [System.Collections.IDictionary]$Headers,
+        [string]$Name,
+        [bool]$IgnoreCertificateErrors = $false
+    )
+
+    $Region =
+        Get-VcfaRegions `
+            -Server $Server `
+            -Headers $Headers `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors |
+        Where-Object {
+            $_.name -eq $Name
+        } |
+        Select-Object -First 1
+
+    if (-not $Region) {
+
+        throw (
+            "VCFA region '$Name' not found."
+        )
+    }
+
+    return $Region
+}
+
+
+# ============================================================
+# Zones
+# ============================================================
+
+function Get-VcfaZones {
+
+    param (
+        [string]$Server,
+        [System.Collections.IDictionary]$Headers,
+        [string]$RegionId,
+        [bool]$IgnoreCertificateErrors = $false
+    )
+
+    $Zones =
+        Get-VcfaPagedValues `
+            -Server $Server `
+            -Path "/cloudapi/v1/zones" `
+            -Headers $Headers `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors
+
+    return $Zones |
+        Where-Object {
+
+            (
+                $_.region -and
+                $_.region.id -eq $RegionId
+            ) -or
+            (
+                $_.regionRef -and
+                $_.regionRef.id -eq $RegionId
+            )
+        }
+}
+
+
+# ============================================================
+# Supervisors
+# ============================================================
+
+function Get-VcfaSupervisors {
+
+    param (
+        [string]$Server,
+        [System.Collections.IDictionary]$Headers,
+        [string]$RegionId,
+        [bool]$IgnoreCertificateErrors = $false
+    )
+
+    $Supervisors =
+        Get-VcfaPagedValues `
+            -Server $Server `
+            -Path "/cloudapi/v1/supervisors" `
+            -Headers $Headers `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors
+
+    return $Supervisors |
+        Where-Object {
+
+            (
+                $_.region -and
+                $_.region.id -eq $RegionId
+            ) -or
+            (
+                $_.regionRef -and
+                $_.regionRef.id -eq $RegionId
+            )
+        }
+}
+
+
+# ============================================================
+# Virtual Datacenters / Region Quotas
+# ============================================================
+
+function Get-VcfaVirtualDatacenters {
+
+    param (
+        [string]$Server,
+        [System.Collections.IDictionary]$Headers,
+        [bool]$IgnoreCertificateErrors = $false
+    )
+
+    return Get-VcfaPagedValues `
+        -Server $Server `
+        -Path "/cloudapi/v1/virtualDatacenters" `
+        -Headers $Headers `
+        -IgnoreCertificateErrors `
+            $IgnoreCertificateErrors
+}
+
+
+function Get-VcfaRegionQuota {
+
+    param (
+        [string]$Server,
+        [System.Collections.IDictionary]$Headers,
+        [string]$OrgId,
+        [string]$RegionId,
+        [bool]$IgnoreCertificateErrors = $false
+    )
+
+    return Get-VcfaVirtualDatacenters `
+        -Server $Server `
+        -Headers $Headers `
+        -IgnoreCertificateErrors `
+            $IgnoreCertificateErrors |
+        Where-Object {
+
+            (
+                (
+                    $_.org.id -eq $OrgId -or
+                    $_.orgRef.id -eq $OrgId
+                ) -and
+                (
+                    $_.region.id -eq $RegionId -or
+                    $_.regionRef.id -eq $RegionId
+                )
+            )
+        } |
+        Select-Object -First 1
+}
+
+
+function New-VcfaRegionQuotaIfMissing {
+
+    param (
+        [string]$Server,
+        [System.Collections.IDictionary]$Headers,
+        $Tenant,
+        $QuotaConfig,
+        [bool]$IgnoreCertificateErrors = $false
+    )
+
+    $Region =
+        Get-VcfaRegion `
+            -Server $Server `
+            -Headers $Headers `
+            -Name $QuotaConfig.region `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors
+
+    $Existing =
+        Get-VcfaRegionQuota `
+            -Server $Server `
+            -Headers $Headers `
+            -OrgId $Tenant.id `
+            -RegionId $Region.id `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors
+
+    if ($Existing) {
+
+        Write-Skip (
+            "Regional quota for '$($Tenant.name)' / " +
+            "'$($Region.name)' already exists"
+        )
+
+        return $Existing
+    }
+
+    $FullAllocation = $false
+
+    if (
+        Test-Property `
+            $QuotaConfig `
+            "share_all"
+    ) {
+
+        $FullAllocation =
+            [bool]$QuotaConfig.share_all
+    }
+
+    $Body = [ordered]@{
+
+        name = (
+            "$($Tenant.name)-$($Region.name)"
+        )
+
+        org = @{
+            name = $Tenant.name
+            id   = $Tenant.id
+        }
+
+        region = @{
+            name = $Region.name
+            id   = $Region.id
+        }
+
+        isFullAllocation = $FullAllocation
+    }
+
+
+    # --------------------------------------------------------
+    # Supervisors
+    # --------------------------------------------------------
+
+    if (-not $FullAllocation) {
+
+        $AvailableSupervisors = @(
+            Get-VcfaSupervisors `
+                -Server $Server `
+                -Headers $Headers `
+                -RegionId $Region.id `
+                -IgnoreCertificateErrors `
+                    $IgnoreCertificateErrors
+        )
+
+        $SelectedSupervisors = @()
+
         if (
-            $null -ne `
-                $Policy.compatible_region_zones
+            (
+                Test-Property `
+                    $QuotaConfig `
+                    "all_supervisors"
+            ) -and
+            [bool]$QuotaConfig.all_supervisors
         ) {
-            $Body.compatibleRegionZones =
-                $Policy.compatible_region_zones
+
+            $SelectedSupervisors =
+                @($AvailableSupervisors)
+        }
+        elseif (
+            Test-Property `
+                $QuotaConfig `
+                "supervisors"
+        ) {
+
+            foreach (
+                $SupervisorName in
+                @($QuotaConfig.supervisors)
+            ) {
+
+                $Supervisor =
+                    $AvailableSupervisors |
+                    Where-Object {
+                        $_.name -eq $SupervisorName
+                    } |
+                    Select-Object -First 1
+
+                if (-not $Supervisor) {
+
+                    throw (
+                        "Supervisor '$SupervisorName' " +
+                        "not found in region " +
+                        "'$($Region.name)'."
+                    )
+                }
+
+                $SelectedSupervisors +=
+                    $Supervisor
+            }
+        }
+
+        $Body.supervisors = @(
+            $SelectedSupervisors |
+            ForEach-Object {
+
+                $SupervisorId = $_.id
+
+                if (
+                    -not $SupervisorId -and
+                    $_.supervisorId
+                ) {
+                    $SupervisorId =
+                        $_.supervisorId
+                }
+
+                @{
+                    name = $_.name
+                    id   = $SupervisorId
+                }
+            }
+        )
+    }
+
+
+    # --------------------------------------------------------
+    # Zone Capacity
+    # --------------------------------------------------------
+
+    if (
+        -not $FullAllocation -and
+        (
+            Test-Property `
+                $QuotaConfig `
+                "capacity"
+        )
+    ) {
+
+        $Capacity =
+            $QuotaConfig.capacity
+
+        $AvailableZones = @(
+            Get-VcfaZones `
+                -Server $Server `
+                -Headers $Headers `
+                -RegionId $Region.id `
+                -IgnoreCertificateErrors `
+                    $IgnoreCertificateErrors
+        )
+
+        $ZoneConfigs = @()
+
+        if (
+            (
+                Test-Property `
+                    $Capacity `
+                    "all_zones"
+            ) -and
+            [bool]$Capacity.all_zones
+        ) {
+
+            foreach ($Zone in $AvailableZones) {
+
+                $ZoneConfigs +=
+                    [PSCustomObject]@{
+                        zone =
+                            $Zone.name
+
+                        cpu_limit_GHz =
+                            0
+
+                        memory_limit_GB =
+                            0
+
+                        cpu_reservation_GHz =
+                            0
+
+                        memory_reservation_GB =
+                            0
+                    }
+            }
+        }
+        else {
+
+            $ZoneConfigs =
+                @($Capacity.zones)
+        }
+
+        $Body.zoneResourceAllocation =
+            @()
+
+        foreach ($ZoneConfig in $ZoneConfigs) {
+
+            $Zone =
+                $AvailableZones |
+                Where-Object {
+                    $_.name -eq $ZoneConfig.zone -or
+                    $_.zone.name -eq $ZoneConfig.zone
+                } |
+                Select-Object -First 1
+
+            if (-not $Zone) {
+
+                throw (
+                    "Zone '$($ZoneConfig.zone)' not found " +
+                    "in region '$($Region.name)'."
+                )
+            }
+
+            $ZoneName =
+                $Zone.name
+
+            $ZoneId =
+                $Zone.id
+
+            if (
+                Test-Property `
+                    $Zone `
+                    "zone"
+            ) {
+
+                if ($Zone.zone.name) {
+                    $ZoneName =
+                        $Zone.zone.name
+                }
+
+                if ($Zone.zone.id) {
+                    $ZoneId =
+                        $Zone.zone.id
+                }
+            }
+
+            $Body.zoneResourceAllocation +=
+                [ordered]@{
+
+                    zone = @{
+                        name = $ZoneName
+                        id   = $ZoneId
+                    }
+
+                    resourceAllocation = @{
+
+                        #
+                        # GHz -> MHz
+                        #
+
+                        cpuLimitMHz =
+                            [int64](
+                                [double]$ZoneConfig.cpu_limit_GHz *
+                                1000
+                            )
+
+                        cpuReservationMHz =
+                            [int64](
+                                [double]$ZoneConfig.cpu_reservation_GHz *
+                                1000
+                            )
+
+                        #
+                        # GB -> MiB
+                        #
+
+                        memoryLimitMiB =
+                            [int64](
+                                [double]$ZoneConfig.memory_limit_GB *
+                                1024
+                            )
+
+                        memoryReservationMiB =
+                            [int64](
+                                [double]$ZoneConfig.memory_reservation_GB *
+                                1024
+                            )
+                    }
+                }
         }
     }
 
     Write-Create (
-        "VCFA infrastructure policy " +
-        "'$($Policy.name)'"
+        "VCFA regional quota '$($Body.name)'"
     )
+
+    Invoke-ApiRest `
+        -Uri (
+            "https://$Server/cloudapi/v1/" +
+            "virtualDatacenters"
+        ) `
+        -Method POST `
+        -Headers $Headers `
+        -Body $Body `
+        -IgnoreCertificateErrors `
+            $IgnoreCertificateErrors |
+        Out-Null
+
+
+    for ($i = 0; $i -lt 60; $i++) {
+
+        $Quota =
+            Get-VcfaRegionQuota `
+                -Server $Server `
+                -Headers $Headers `
+                -OrgId $Tenant.id `
+                -RegionId $Region.id `
+                -IgnoreCertificateErrors `
+                    $IgnoreCertificateErrors
+
+        if ($Quota) {
+
+            if (
+                -not (
+                    Test-Property `
+                        $Quota `
+                        "status"
+                ) -or
+                $Quota.status -eq "READY"
+            ) {
+
+                return $Quota
+            }
+
+            if ($Quota.status -eq "FAILED") {
+
+                throw (
+                    "Region quota '$($Body.name)' failed."
+                )
+            }
+        }
+
+        Start-Sleep -Seconds 2
+    }
+
+    throw (
+        "Timed out waiting for regional quota " +
+        "'$($Body.name)'."
+    )
+}
+
+
+# ============================================================
+# VM Classes
+# ============================================================
+
+function Get-VcfaRegionVmClasses {
+
+    param (
+        [string]$Server,
+        [System.Collections.IDictionary]$Headers,
+        [string]$RegionId,
+        [bool]$IgnoreCertificateErrors = $false
+    )
+
+    $Values =
+        Get-VcfaPagedValues `
+            -Server $Server `
+            -Path (
+                "/cloudapi/v1/" +
+                "virtualMachineClasses"
+            ) `
+            -Headers $Headers `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors
+
+    return $Values |
+        Where-Object {
+
+            (
+                $_.region.id -eq $RegionId -or
+                $_.regionRef.id -eq $RegionId
+            )
+        }
+}
+
+
+function Set-VcfaVdcVmClasses {
+
+    param (
+        [string]$Server,
+        [System.Collections.IDictionary]$Headers,
+        $Vdc,
+        $Config,
+        [bool]$IgnoreCertificateErrors = $false
+    )
+
+    if (
+        $Vdc.isFullAllocation
+    ) {
+
+        Write-Skip (
+            "VM classes inherited because " +
+            "regional quota has full allocation"
+        )
+
+        return
+    }
+
+    $RegionId =
+        $Vdc.region.id
+
+    if (-not $RegionId) {
+        $RegionId =
+            $Vdc.regionRef.id
+    }
+
+    $Available = @(
+        Get-VcfaRegionVmClasses `
+            -Server $Server `
+            -Headers $Headers `
+            -RegionId $RegionId `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors
+    )
+
+    $Selected = @()
+
+    if (
+        (
+            Test-Property `
+                $Config `
+                "all_classes"
+        ) -and
+        [bool]$Config.all_classes
+    ) {
+
+        $Selected =
+            @($Available)
+    }
+    else {
+
+        foreach (
+            $Name in @($Config.classes)
+        ) {
+
+            $Match =
+                $Available |
+                Where-Object {
+                    $_.name -eq $Name
+                } |
+                Select-Object -First 1
+
+            if (-not $Match) {
+
+                throw (
+                    "VM class '$Name' not found."
+                )
+            }
+
+            $Selected += $Match
+        }
+    }
+
+    $Body = @{
+        values = @(
+            $Selected |
+            ForEach-Object {
+                @{
+                    name = $_.name
+                    id   = $_.id
+                }
+            }
+        )
+    }
+
+    Write-Info (
+        "Assigning $($Body.values.Count) " +
+        "VM classes to '$($Vdc.name)'"
+    )
+
+    Invoke-ApiRest `
+        -Uri (
+            "https://$Server/cloudapi/v1/" +
+            "virtualDatacenters/$($Vdc.id)/" +
+            "virtualMachineClasses"
+        ) `
+        -Method PUT `
+        -Headers $Headers `
+        -Body $Body `
+        -IgnoreCertificateErrors `
+            $IgnoreCertificateErrors |
+        Out-Null
+}
+
+
+# ============================================================
+# Storage Classes / Region Storage Policies
+# ============================================================
+
+function Get-VcfaRegionStoragePolicies {
+
+    param (
+        [string]$Server,
+        [System.Collections.IDictionary]$Headers,
+        [string]$RegionId,
+        [bool]$IgnoreCertificateErrors = $false
+    )
+
+    $Values =
+        Get-VcfaPagedValues `
+            -Server $Server `
+            -Path (
+                "/cloudapi/v1/" +
+                "regionStoragePolicies"
+            ) `
+            -Headers $Headers `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors
+
+    return $Values |
+        Where-Object {
+
+            (
+                $_.region.id -eq $RegionId -or
+                $_.regionRef.id -eq $RegionId
+            )
+        }
+}
+
+
+# ============================================================
+# FIXED: Storage assignment requires virtualDatacenter
+# inside EACH values[] entry.
+# ============================================================
+
+function Set-VcfaVdcStorageClasses {
+
+    param (
+        [Parameter(Mandatory)]
+        [string]$Server,
+
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary]$Headers,
+
+        [Parameter(Mandatory)]
+        $Vdc,
+
+        [Parameter(Mandatory)]
+        $Config,
+
+        [bool]$IgnoreCertificateErrors = $false
+    )
+
+
+    # --------------------------------------------------------
+    # Validate VDC
+    # --------------------------------------------------------
+
+    if (
+        [string]::IsNullOrWhiteSpace(
+            [string]$Vdc.id
+        )
+    ) {
+
+        throw "VDC does not contain an id."
+    }
+
+
+    if (
+        [string]::IsNullOrWhiteSpace(
+            [string]$Vdc.name
+        )
+    ) {
+
+        throw "VDC does not contain a name."
+    }
+
+
+    $RegionId = $null
+    $RegionName = $null
+
+
+    if (
+        Test-Property `
+            $Vdc `
+            "region"
+    ) {
+
+        $RegionId =
+            $Vdc.region.id
+
+        $RegionName =
+            $Vdc.region.name
+    }
+
+
+    if (
+        -not $RegionId -and
+        (
+            Test-Property `
+                $Vdc `
+                "regionRef"
+        )
+    ) {
+
+        $RegionId =
+            $Vdc.regionRef.id
+
+        $RegionName =
+            $Vdc.regionRef.name
+    }
+
+
+    if (
+        [string]::IsNullOrWhiteSpace(
+            [string]$RegionId
+        )
+    ) {
+
+        throw (
+            "VDC '$($Vdc.name)' does not contain " +
+            "a valid region reference."
+        )
+    }
+
+
+    # --------------------------------------------------------
+    # Get storage policies
+    # --------------------------------------------------------
+
+    $Available = @(
+        Get-VcfaRegionStoragePolicies `
+            -Server $Server `
+            -Headers $Headers `
+            -RegionId $RegionId `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors
+    )
+
+
+    if ($Available.Count -eq 0) {
+
+        throw (
+            "No storage policies found in region " +
+            "'$RegionName'."
+        )
+    }
+
+
+    # --------------------------------------------------------
+    # Select policies
+    # --------------------------------------------------------
+
+    $Selected = @()
+
+
+    if (
+        (
+            Test-Property `
+                $Config `
+                "all_classes"
+        ) -and
+        [bool]$Config.all_classes
+    ) {
+
+        $Selected =
+            @($Available)
+
+
+        Write-Info (
+            "Using all $($Selected.Count) storage " +
+            "classes for '$($Vdc.name)'"
+        )
+    }
+    else {
+
+        $ConfiguredClasses = @()
+
+
+        if (
+            Test-Property `
+                $Config `
+                "classes"
+        ) {
+
+            $ConfiguredClasses =
+                @($Config.classes)
+        }
+
+
+        foreach ($Name in $ConfiguredClasses) {
+
+            $Match =
+                $Available |
+                Where-Object {
+
+                    $_.name -eq $Name -or
+                    $_.kubernetesCompliantName -eq $Name
+
+                } |
+                Select-Object -First 1
+
+
+            if (-not $Match) {
+
+                throw (
+                    "Storage class '$Name' not found " +
+                    "in region '$RegionName'."
+                )
+            }
+
+
+            $Selected +=
+                $Match
+        }
+    }
+
+
+    if ($Selected.Count -eq 0) {
+
+        Write-Skip (
+            "No storage classes selected for " +
+            "'$($Vdc.name)'"
+        )
+
+        return
+    }
+
+
+    # --------------------------------------------------------
+    # Build correct VCFA storage-policy assignment
+    # --------------------------------------------------------
+
+    $Values = @()
+
+
+    foreach ($StoragePolicy in $Selected) {
+
+        if (
+            [string]::IsNullOrWhiteSpace(
+                [string]$StoragePolicy.id
+            )
+        ) {
+
+            throw (
+                "Storage policy '$($StoragePolicy.name)' " +
+                "does not contain an id."
+            )
+        }
+
+
+        $Values += [ordered]@{
+
+            #
+            # REQUIRED by VCFA
+            #
+
+            virtualDatacenter = [ordered]@{
+                name = $Vdc.name
+                id   = $Vdc.id
+            }
+
+
+            regionStoragePolicy = [ordered]@{
+                name = $StoragePolicy.name
+                id   = $StoragePolicy.id
+            }
+
+
+            #
+            # 0 means no explicit storage limit.
+            #
+
+            storageLimitMiB = 0
+        }
+    }
+
+
+    $Body = [ordered]@{
+        values = $Values
+    }
+
+
+    Write-Info (
+        "Assigning $($Values.Count) storage classes " +
+        "to VDC '$($Vdc.name)'"
+    )
+
+
+    $Uri = (
+        "https://$Server/cloudapi/v1/" +
+        "virtualDatacenters/$($Vdc.id)/" +
+        "virtualDatacenterStoragePolicies"
+    )
+
 
     try {
 
         Invoke-ApiRest `
-            -Uri (
-                "https://$Server/cloudapi/v1/infraPolicies"
-            ) `
-            -Method POST `
+            -Uri $Uri `
+            -Method PUT `
             -Headers $Headers `
             -Body $Body `
             -IgnoreCertificateErrors `
                 $IgnoreCertificateErrors |
             Out-Null
 
+
         Write-Host (
-            "[ACCEPTED] VCFA infrastructure policy " +
-            "'$($Policy.name)'"
+            "[UPDATED] Storage classes for " +
+            "'$($Vdc.name)'"
         ) -ForegroundColor Green
     }
     catch {
 
-        $Status = Get-HttpStatusCode $_
+        $Status =
+            Get-HttpStatusCode $_
+
 
         Write-Host ""
         Write-Host (
-            "VCFA infrastructure policy creation failed"
+            "VCFA storage class assignment failed"
         ) -ForegroundColor Red
 
-        Write-Host "Policy: $($Policy.name)"
-        Write-Host "HTTP:   $Status"
+
+        Write-Host "VDC:      $($Vdc.name)"
+        Write-Host "VDC ID:   $($Vdc.id)"
+        Write-Host "HTTP:     $Status"
+        Write-Host "Endpoint: $Uri"
+
 
         Write-Host ""
+        Write-Host "Payload:"
+
+        Write-Host (
+            $Body |
+                ConvertTo-Json -Depth 20
+        )
+
+
+        Write-Host ""
+        Write-Host "Response:"
+
         Write-Host (
             Get-RestErrorDetail $_
         )
 
-        if ($Status -eq 401) {
-
-            Write-Warn (
-                "VCFA bearer token was rejected."
-            )
-        }
-
-        if ($Status -eq 403) {
-
-            Write-Warn (
-                "VCFA authenticated the token but denied " +
-                "the operation. Check provider rights."
-            )
-        }
 
         throw
     }
@@ -1305,67 +2361,734 @@ function New-VcfaInfrastructurePolicyIfMissing {
 
 
 # ============================================================
-# Load JSON
+# Region Infrastructure Policies
+# ============================================================
+
+function Get-VcfaRegionInfraPolicies {
+
+    param (
+        [string]$Server,
+        [System.Collections.IDictionary]$Headers,
+        [string]$RegionId,
+        [bool]$IgnoreCertificateErrors = $false
+    )
+
+    return Get-VcfaPagedValues `
+        -Server $Server `
+        -Path (
+            "/cloudapi/v1/regions/" +
+            "$RegionId/infraPolicies"
+        ) `
+        -Headers $Headers `
+        -IgnoreCertificateErrors `
+            $IgnoreCertificateErrors
+}
+
+
+function Set-VcfaVdcInfraPolicies {
+
+    param (
+        [string]$Server,
+        [System.Collections.IDictionary]$Headers,
+        $Vdc,
+        $Config,
+        [bool]$IgnoreCertificateErrors = $false
+    )
+
+    $RegionId =
+        $Vdc.region.id
+
+    if (-not $RegionId) {
+        $RegionId =
+            $Vdc.regionRef.id
+    }
+
+    $Available = @(
+        Get-VcfaRegionInfraPolicies `
+            -Server $Server `
+            -Headers $Headers `
+            -RegionId $RegionId `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors
+    )
+
+    $Selected = @()
+
+    if (
+        (
+            Test-Property `
+                $Config `
+                "all_policies"
+        ) -and
+        [bool]$Config.all_policies
+    ) {
+
+        $Selected =
+            @($Available)
+    }
+    else {
+
+        $Names = @()
+
+        if (
+            Test-Property `
+                $Config `
+                "policies"
+        ) {
+
+            $Names =
+                @($Config.policies)
+        }
+        elseif (
+            Test-Property `
+                $Config `
+                "polices"
+        ) {
+
+            #
+            # Backwards compatibility for original typo
+            #
+
+            $Names =
+                @($Config.polices)
+        }
+
+
+        foreach ($Name in $Names) {
+
+            $Match =
+                $Available |
+                Where-Object {
+                    $_.name -eq $Name
+                } |
+                Select-Object -First 1
+
+            if (-not $Match) {
+
+                throw (
+                    "Infrastructure policy '$Name' " +
+                    "not found."
+                )
+            }
+
+            $Selected +=
+                $Match
+        }
+    }
+
+
+    $Body = @{
+        values = @(
+            $Selected |
+            ForEach-Object {
+                @{
+                    infraPolicy = @{
+                        name = $_.name
+                        id   = $_.id
+                    }
+
+                    status = "ENABLED"
+                }
+            }
+        )
+    }
+
+
+    Write-Info (
+        "Assigning $($Body.values.Count) " +
+        "infrastructure policies to " +
+        "'$($Vdc.name)'"
+    )
+
+
+    Invoke-ApiRest `
+        -Uri (
+            "https://$Server/cloudapi/v1/" +
+            "virtualDatacenters/$($Vdc.id)/" +
+            "infraPolicies"
+        ) `
+        -Method PUT `
+        -Headers $Headers `
+        -Body $Body `
+        -IgnoreCertificateErrors `
+            $IgnoreCertificateErrors |
+        Out-Null
+}
+
+
+# ============================================================
+# Regional Networking Settings
+# ============================================================
+
+function Get-VcfaRegionalNetworkingSettings {
+
+    param (
+        [string]$Server,
+        [System.Collections.IDictionary]$Headers,
+        [bool]$IgnoreCertificateErrors = $false
+    )
+
+    return Get-VcfaPagedValues `
+        -Server $Server `
+        -Path (
+            "/cloudapi/v1/" +
+            "regionalNetworkingSettings"
+        ) `
+        -Headers $Headers `
+        -PageSize 32 `
+        -IgnoreCertificateErrors `
+            $IgnoreCertificateErrors
+}
+
+
+function Get-OrCreateVcfaRegionalNetworkingSetting {
+
+    param (
+        [string]$Server,
+        [System.Collections.IDictionary]$Headers,
+        $Tenant,
+        $Region,
+        [bool]$IgnoreCertificateErrors = $false
+    )
+
+    $Existing =
+        Get-VcfaRegionalNetworkingSettings `
+            -Server $Server `
+            -Headers $Headers `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors |
+        Where-Object {
+
+            $_.orgRef.id -eq $Tenant.id -and
+            $_.regionRef.id -eq $Region.id
+
+        } |
+        Select-Object -First 1
+
+
+    if ($Existing) {
+
+        Write-Skip (
+            "Regional networking setting already " +
+            "exists for '$($Tenant.name)' / " +
+            "'$($Region.name)'"
+        )
+
+        return $Existing
+    }
+
+
+    $Body = [ordered]@{
+
+        name = (
+            "$($Tenant.name)-$($Region.name)"
+        )
+
+        orgRef = @{
+            name = $Tenant.name
+            id   = $Tenant.id
+        }
+
+        regionRef = @{
+            name = $Region.name
+            id   = $Region.id
+        }
+    }
+
+
+    Write-Create (
+        "Regional networking setting " +
+        "'$($Body.name)'"
+    )
+
+
+    Invoke-ApiRest `
+        -Uri (
+            "https://$Server/cloudapi/v1/" +
+            "regionalNetworkingSettings"
+        ) `
+        -Method POST `
+        -Headers $Headers `
+        -Body $Body `
+        -IgnoreCertificateErrors `
+            $IgnoreCertificateErrors |
+        Out-Null
+
+
+    for ($i = 0; $i -lt 60; $i++) {
+
+        $Setting =
+            Get-VcfaRegionalNetworkingSettings `
+                -Server $Server `
+                -Headers $Headers `
+                -IgnoreCertificateErrors `
+                    $IgnoreCertificateErrors |
+            Where-Object {
+
+                $_.orgRef.id -eq $Tenant.id -and
+                $_.regionRef.id -eq $Region.id
+
+            } |
+            Select-Object -First 1
+
+
+        if ($Setting) {
+            return $Setting
+        }
+
+
+        Start-Sleep -Seconds 2
+    }
+
+
+    throw (
+        "Timed out waiting for regional " +
+        "networking setting."
+    )
+}
+
+
+# ============================================================
+# Distributed VLAN Connections
+# ============================================================
+
+function Get-VcfaDistributedVlanConnections {
+
+    param (
+        [string]$Server,
+        [System.Collections.IDictionary]$Headers,
+        [bool]$IgnoreCertificateErrors = $false
+    )
+
+    return Get-VcfaPagedValues `
+        -Server $Server `
+        -Path (
+            "/cloudapi/v1/" +
+            "distributedVlanConnections"
+        ) `
+        -Headers $Headers `
+        -IgnoreCertificateErrors `
+            $IgnoreCertificateErrors
+}
+
+
+function Set-VcfaExternalConnection {
+
+    param (
+        [string]$Server,
+        [System.Collections.IDictionary]$Headers,
+        $Tenant,
+        $Region,
+        [string]$ConnectionName,
+        [bool]$IgnoreCertificateErrors = $false
+    )
+
+    $Setting =
+        Get-OrCreateVcfaRegionalNetworkingSetting `
+            -Server $Server `
+            -Headers $Headers `
+            -Tenant $Tenant `
+            -Region $Region `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors
+
+
+    $Connection =
+        Get-VcfaDistributedVlanConnections `
+            -Server $Server `
+            -Headers $Headers `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors |
+        Where-Object {
+
+            $_.name -eq $ConnectionName -and
+            (
+                -not $_.regionRef -or
+                $_.regionRef.id -eq $Region.id
+            )
+        } |
+        Select-Object -First 1
+
+
+    if (-not $Connection) {
+
+        throw (
+            "Distributed VLAN connection " +
+            "'$ConnectionName' not found in region " +
+            "'$($Region.name)'."
+        )
+    }
+
+
+    $Existing =
+        Invoke-ApiRest `
+            -Uri (
+                "https://$Server/cloudapi/v1/" +
+                "regionalNetworkingSettings/" +
+                "$($Setting.id)/" +
+                "distributedVlanConnections"
+            ) `
+            -Method GET `
+            -Headers $Headers `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors
+
+
+    $Match =
+        @($Existing.values) |
+        Where-Object {
+
+            $_.distributedVlanConnectionRef.id -eq
+                $Connection.id
+
+        } |
+        Select-Object -First 1
+
+
+    if ($Match) {
+
+        Write-Skip (
+            "External connection '$ConnectionName' " +
+            "already assigned"
+        )
+
+        return
+    }
+
+
+    $Body = [ordered]@{
+
+        distributedVlanConnectionRef = @{
+            name = $Connection.name
+            id   = $Connection.id
+        }
+
+        isDefault = $true
+    }
+
+
+    Write-Create (
+        "External connection '$ConnectionName'"
+    )
+
+
+    Invoke-ApiRest `
+        -Uri (
+            "https://$Server/cloudapi/v1/" +
+            "regionalNetworkingSettings/" +
+            "$($Setting.id)/" +
+            "distributedVlanConnections"
+        ) `
+        -Method POST `
+        -Headers $Headers `
+        -Body $Body `
+        -IgnoreCertificateErrors `
+            $IgnoreCertificateErrors |
+        Out-Null
+}
+
+
+# ============================================================
+# Roles
+# ============================================================
+
+function Get-VcfaRoles {
+
+    param (
+        [string]$Server,
+        [System.Collections.IDictionary]$Headers,
+        [bool]$IgnoreCertificateErrors = $false
+    )
+
+    return Get-VcfaPagedValues `
+        -Server $Server `
+        -Path "/cloudapi/1.0.0/roles" `
+        -Headers $Headers `
+        -IgnoreCertificateErrors `
+            $IgnoreCertificateErrors
+}
+
+
+# ============================================================
+# Users
+# ============================================================
+
+function Get-VcfaUsers {
+
+    param (
+        [string]$Server,
+        [System.Collections.IDictionary]$Headers,
+        [bool]$IgnoreCertificateErrors = $false
+    )
+
+    return Get-VcfaPagedValues `
+        -Server $Server `
+        -Path "/cloudapi/1.0.0/users" `
+        -Headers $Headers `
+        -IgnoreCertificateErrors `
+            $IgnoreCertificateErrors
+}
+
+
+function New-VcfaFirstUserIfMissing {
+
+    param (
+        [string]$Server,
+        [System.Collections.IDictionary]$Headers,
+        $Tenant,
+        $UserConfig,
+        [string]$ConfigDirectory,
+        [bool]$IgnoreCertificateErrors = $false
+    )
+
+    $TenantHeaders =
+        New-VcfaTenantHeaders `
+            -Headers $Headers `
+            -OrgId $Tenant.id
+
+
+    $Existing =
+        Get-VcfaUsers `
+            -Server $Server `
+            -Headers $TenantHeaders `
+            -IgnoreCertificateErrors `
+                $IgnoreCertificateErrors |
+        Where-Object {
+            $_.username -eq $UserConfig.username
+        } |
+        Select-Object -First 1
+
+
+    if ($Existing) {
+
+        Write-Skip (
+            "VCFA user '$($UserConfig.username)' " +
+            "already exists"
+        )
+
+        return
+    }
+
+
+    $ProviderType =
+        "LOCAL"
+
+
+    if (
+        Test-Property `
+            $UserConfig `
+            "provider_type"
+    ) {
+
+        $ProviderType =
+            $UserConfig.provider_type
+    }
+
+
+    $Body = [ordered]@{
+
+        username =
+            $UserConfig.username
+
+        providerType =
+            $ProviderType
+
+        enabled =
+            $true
+
+        orgEntityRef = @{
+            name = $Tenant.name
+            id   = $Tenant.id
+        }
+    }
+
+
+    if (
+        Test-Property `
+            $UserConfig `
+            "enabled"
+    ) {
+
+        $Body.enabled =
+            [bool]$UserConfig.enabled
+    }
+
+
+    if ($ProviderType -eq "LOCAL") {
+
+        if (
+            -not (
+                Test-Property `
+                    $UserConfig `
+                    "password_file"
+            )
+        ) {
+
+            throw (
+                "LOCAL user '$($UserConfig.username)' " +
+                "requires password_file."
+            )
+        }
+
+
+        $UserPasswordFile =
+            Resolve-ConfigFilePath `
+                -Path $UserConfig.password_file `
+                -ConfigDirectory $ConfigDirectory
+
+
+        if (
+            -not (
+                Test-Path $UserPasswordFile
+            )
+        ) {
+
+            throw (
+                "User password file not found: " +
+                "$UserPasswordFile"
+            )
+        }
+
+
+        $Body.password = (
+            Get-Content `
+                -Path $UserPasswordFile `
+                -Raw
+        ).Trim()
+    }
+
+
+    if (
+        Test-Property `
+            $UserConfig `
+            "role"
+    ) {
+
+        $Role =
+            Get-VcfaRoles `
+                -Server $Server `
+                -Headers $TenantHeaders `
+                -IgnoreCertificateErrors `
+                    $IgnoreCertificateErrors |
+            Where-Object {
+                $_.name -eq $UserConfig.role
+            } |
+            Select-Object -First 1
+
+
+        if (-not $Role) {
+
+            throw (
+                "VCFA role '$($UserConfig.role)' " +
+                "not found."
+            )
+        }
+
+
+        $Body.roleEntityRefs = @(
+            @{
+                name = $Role.name
+                id   = $Role.id
+            }
+        )
+    }
+
+
+    Write-Create (
+        "VCFA user '$($UserConfig.username)'"
+    )
+
+
+    Invoke-ApiRest `
+        -Uri (
+            "https://$Server/cloudapi/1.0.0/users"
+        ) `
+        -Method POST `
+        -Headers $TenantHeaders `
+        -Body $Body `
+        -IgnoreCertificateErrors `
+            $IgnoreCertificateErrors |
+        Out-Null
+}
+
+
+# ============================================================
+# Load Config
 # ============================================================
 
 $ResolvedConfig = (
     Resolve-Path $ConfigFile
 ).Path
 
-$ConfigDirectory = Split-Path `
-    -Parent `
-    $ResolvedConfig
+$ConfigDirectory =
+    Split-Path `
+        -Parent `
+        $ResolvedConfig
+
 
 Write-Info (
-    "Loading configuration '$ResolvedConfig'"
+    "Loading '$ResolvedConfig'"
 )
 
-$Config = Get-Content `
-    -Path $ResolvedConfig `
-    -Raw |
+
+$Config =
+    Get-Content `
+        -Path $ResolvedConfig `
+        -Raw |
     ConvertFrom-Json
 
 
 # ============================================================
-# Mandatory vCenter Section
+# Validate vCenter
 # ============================================================
 
 if (
     -not (
-        $Config.PSObject.Properties.Name `
-            -contains "vcenter"
+        Test-Property `
+            $Config `
+            "vcenter"
     )
 ) {
-    throw "vcenter section is required"
+
+    throw (
+        "vcenter section is required."
+    )
 }
+
 
 if (-not $Config.vcenter.server) {
-    throw "vcenter.server is required"
+    throw "vcenter.server is required."
 }
+
 
 if (-not $Config.vcenter.username) {
-    throw "vcenter.username is required"
+    throw "vcenter.username is required."
 }
+
 
 if (-not $Config.vcenter.password_file) {
-    throw "vcenter.password_file is required"
+    throw "vcenter.password_file is required."
 }
 
 
 # ============================================================
-# vCenter Password
+# vCenter credentials
 # ============================================================
 
-$PasswordFile = Resolve-ConfigFilePath `
-    -Path $Config.vcenter.password_file `
-    -ConfigDirectory $ConfigDirectory
+$PasswordFile =
+    Resolve-ConfigFilePath `
+        -Path $Config.vcenter.password_file `
+        -ConfigDirectory $ConfigDirectory
+
 
 if (-not (Test-Path $PasswordFile)) {
 
     throw (
-        "vCenter password file not found: $PasswordFile"
+        "vCenter password file not found: " +
+        "$PasswordFile"
     )
 }
+
 
 $Password = (
     Get-Content `
@@ -1373,40 +3096,35 @@ $Password = (
         -Raw
 ).Trim()
 
-if (
-    [string]::IsNullOrWhiteSpace(
-        $Password
+
+$SecurePassword =
+    ConvertTo-SecureString `
+        -String $Password `
+        -AsPlainText `
+        -Force
+
+
+$Credential =
+    [PSCredential]::new(
+        $Config.vcenter.username,
+        $SecurePassword
     )
-) {
 
-    throw "vCenter password file is empty"
-}
-
-$SecurePassword = ConvertTo-SecureString `
-    -String $Password `
-    -AsPlainText `
-    -Force
-
-$Credential = [PSCredential]::new(
-    $Config.vcenter.username,
-    $SecurePassword
-)
-
-
-# ============================================================
-# Certificate Configuration
-# ============================================================
 
 $IgnoreCertErrors = $false
 
+
 if (
-    $Config.vcenter.PSObject.Properties.Name `
-        -contains "ignore_certificate_errors"
+    Test-Property `
+        $Config.vcenter `
+        "ignore_certificate_errors"
 ) {
 
     $IgnoreCertErrors =
-        [bool]$Config.vcenter.ignore_certificate_errors
+        [bool]$Config.vcenter.
+            ignore_certificate_errors
 }
+
 
 if ($IgnoreCertErrors) {
 
@@ -1418,81 +3136,79 @@ if ($IgnoreCertErrors) {
 
 
 # ============================================================
-# Determine Whether VCFA Is Configured
+# Optional VCFA
 # ============================================================
 
-$VcfaConfigured = $false
+$VcfaConfigured = (
+    Test-Property `
+        $Config `
+        "vcfa"
+) -and
+($null -ne $Config.vcfa) -and
+-not [string]::IsNullOrWhiteSpace(
+    [string]$Config.vcfa.server
+)
 
-if (
-    ($Config.PSObject.Properties.Name -contains "vcfa") -and
-    ($null -ne $Config.vcfa) -and
-    -not [string]::IsNullOrWhiteSpace(
-        [string]$Config.vcfa.server
-    )
-) {
-    $VcfaConfigured = $true
-}
-
-
-# ============================================================
-# VCFA Authentication
-# ============================================================
 
 $VcfaHeaders = $null
 $VcfaIgnoreCertErrors = $false
 
+
 if ($VcfaConfigured) {
 
     if (
-        [string]::IsNullOrWhiteSpace(
-            [string]$Config.vcfa.api_token_file
-        )
+        -not $Config.vcfa.api_token_file
     ) {
 
         throw (
-            "vcfa.api_token_file is required " +
-            "when VCFA is configured."
+            "vcfa.api_token_file is required."
         )
     }
 
+
     if (
-        $Config.vcfa.PSObject.Properties.Name `
-            -contains "ignore_certificate_errors"
+        Test-Property `
+            $Config.vcfa `
+            "ignore_certificate_errors"
     ) {
 
         $VcfaIgnoreCertErrors =
-            [bool]$Config.vcfa.ignore_certificate_errors
+            [bool]$Config.vcfa.
+                ignore_certificate_errors
     }
 
-    $VcfaTokenFile = Resolve-ConfigFilePath `
-        -Path $Config.vcfa.api_token_file `
-        -ConfigDirectory $ConfigDirectory
 
-    $VcfaApiToken = Get-VcfaApiToken `
-        -TokenFile $VcfaTokenFile
+    $TokenFile =
+        Resolve-ConfigFilePath `
+            -Path $Config.vcfa.api_token_file `
+            -ConfigDirectory $ConfigDirectory
 
-    Write-Info (
-        "VCFA API token loaded from '$VcfaTokenFile'"
-    )
 
-    $VcfaAccessToken = Get-VcfaAccessToken `
-        -Server $Config.vcfa.server `
-        -ApiToken $VcfaApiToken `
-        -IgnoreCertificateErrors `
-            $VcfaIgnoreCertErrors
+    $ApiToken =
+        Get-VcfaApiToken `
+            -TokenFile $TokenFile
 
-    $VcfaHeaders = New-VcfaHeaders `
-        -AccessToken $VcfaAccessToken
 
-    $VcfaApiToken = $null
+    $AccessToken =
+        Get-VcfaAccessToken `
+            -Server $Config.vcfa.server `
+            -ApiToken $ApiToken `
+            -IgnoreCertificateErrors `
+                $VcfaIgnoreCertErrors
 
-    Write-Info (
-        "VCFA authenticated to '$($Config.vcfa.server)'"
-    )
+
+    $VcfaHeaders =
+        New-VcfaHeaders `
+            -AccessToken $AccessToken
+
+
+    $ApiToken = $null
 }
 else {
 
-    Write-Skip "VCFA configuration not provided"
+    Write-Skip (
+        "VCFA configuration not provided"
+    )
 }
 
 
@@ -1503,28 +3219,32 @@ else {
 $VIServer = $null
 $RestHeaders = $null
 
+
 try {
 
     # ========================================================
-    # vCenter Connection
+    # Connect vCenter
     # ========================================================
 
     Write-Info (
-        "Connecting PowerCLI to " +
-        "'$($Config.vcenter.server)'"
+        "Connecting to '$($Config.vcenter.server)'"
     )
 
-    $VIServer = Connect-VIServer `
-        -Server $Config.vcenter.server `
-        -Credential $Credential `
-        -ErrorAction Stop
 
-    $RestHeaders = New-VCenterRestSession `
-        -Server $Config.vcenter.server `
-        -Username $Config.vcenter.username `
-        -Password $Password `
-        -IgnoreCertificateErrors `
-            $IgnoreCertErrors
+    $VIServer =
+        Connect-VIServer `
+            -Server $Config.vcenter.server `
+            -Credential $Credential `
+            -ErrorAction Stop
+
+
+    $RestHeaders =
+        New-VCenterRestSession `
+            -Server $Config.vcenter.server `
+            -Username $Config.vcenter.username `
+            -Password $Password `
+            -IgnoreCertificateErrors `
+                $IgnoreCertErrors
 
 
     # ========================================================
@@ -1532,93 +3252,107 @@ try {
     # ========================================================
 
     if (
-        ($Config.PSObject.Properties.Name -contains "categories") -and
-        ($null -ne $Config.categories) -and
-        (@($Config.categories).Count -gt 0)
+        (
+            Test-Property `
+                $Config `
+                "categories"
+        ) -and
+        $Config.categories -and
+        (
+            @($Config.categories).Count `
+                -gt 0
+        )
     ) {
 
         Write-Host ""
         Write-Host "========================================"
-        Write-Host " Categories and Tags"
+        Write-Host " vCenter Categories / Tags"
         Write-Host "========================================"
 
+
         foreach (
-            $CategoryConfig in @($Config.categories)
+            $CategoryConfig in
+            @($Config.categories)
         ) {
 
             $Description = ""
 
+
             if (
-                $CategoryConfig.PSObject.Properties.Name `
-                    -contains "description"
+                Test-Property `
+                    $CategoryConfig `
+                    "description"
             ) {
 
-                if ($null -ne $CategoryConfig.description) {
-
-                    $Description =
-                        [string]$CategoryConfig.description
-                }
+                $Description =
+                    [string]$CategoryConfig.description
             }
 
-            $EntityTypes = @()
+
+            $Cardinality =
+                "Single"
+
 
             if (
-                $CategoryConfig.PSObject.Properties.Name `
-                    -contains "entity_types"
+                Test-Property `
+                    $CategoryConfig `
+                    "cardinality"
             ) {
 
-                $EntityTypes = @(
-                    $CategoryConfig.entity_types
-                )
+                $Cardinality =
+                    [string]$CategoryConfig.cardinality
             }
 
-            $Cardinality = "Single"
+
+            $EntityTypes =
+                @()
+
 
             if (
-                $CategoryConfig.PSObject.Properties.Name `
-                    -contains "cardinality"
+                Test-Property `
+                    $CategoryConfig `
+                    "entity_types"
             ) {
 
-                if (
-                    -not [string]::IsNullOrWhiteSpace(
-                        [string]$CategoryConfig.cardinality
+                $EntityTypes =
+                    @(
+                        $CategoryConfig.entity_types
                     )
-                ) {
-                    $Cardinality =
-                        [string]$CategoryConfig.cardinality
-                }
             }
 
-            $Category = Get-OrCreateTagCategory `
-                -Name $CategoryConfig.name `
-                -Description $Description `
-                -Cardinality $Cardinality `
-                -EntityTypes $EntityTypes
+
+            $Category =
+                Get-OrCreateTagCategory `
+                    -Name $CategoryConfig.name `
+                    -Description $Description `
+                    -Cardinality $Cardinality `
+                    -EntityTypes $EntityTypes
 
 
             if (
-                ($CategoryConfig.PSObject.Properties.Name -contains "tags") -and
-                ($null -ne $CategoryConfig.tags) -and
-                (@($CategoryConfig.tags).Count -gt 0)
+                Test-Property `
+                    $CategoryConfig `
+                    "tags"
             ) {
 
                 foreach (
-                    $TagConfig in @($CategoryConfig.tags)
+                    $TagConfig in
+                    @($CategoryConfig.tags)
                 ) {
 
                     $TagDescription = ""
 
+
                     if (
-                        $TagConfig.PSObject.Properties.Name `
-                            -contains "description"
+                        Test-Property `
+                            $TagConfig `
+                            "description"
                     ) {
 
-                        if ($null -ne $TagConfig.description) {
-
-                            $TagDescription =
-                                [string]$TagConfig.description
-                        }
+                        $TagDescription =
+                            [string]$TagConfig.description
                     }
+
 
                     Get-OrCreateTag `
                         -Name $TagConfig.name `
@@ -1627,18 +3361,13 @@ try {
                         Out-Null
                 }
             }
-            else {
-
-                Write-Skip (
-                    "No tags configured for category " +
-                    "'$($CategoryConfig.name)'"
-                )
-            }
         }
     }
     else {
 
-        Write-Skip "No vCenter categories configured"
+        Write-Skip (
+            "No vCenter categories configured"
+        )
     }
 
 
@@ -1647,65 +3376,68 @@ try {
     # ========================================================
 
     if (
-        ($Config.PSObject.Properties.Name -contains "assignments") -and
-        ($null -ne $Config.assignments) -and
-        (@($Config.assignments).Count -gt 0)
+        (
+            Test-Property `
+                $Config `
+                "assignments"
+        ) -and
+        $Config.assignments -and
+        (
+            @($Config.assignments).Count `
+                -gt 0
+        )
     ) {
 
         Write-Host ""
         Write-Host "========================================"
-        Write-Host " Tag Assignments"
+        Write-Host " vCenter Tag Assignments"
         Write-Host "========================================"
 
+
         foreach (
-            $Assignment in @($Config.assignments)
+            $Assignment in
+            @($Config.assignments)
         ) {
 
-            $Entity = Get-vSphereObject `
-                -Type $Assignment.type `
-                -Name $Assignment.name
+            $Entity =
+                Get-vSphereObject `
+                    -Type $Assignment.type `
+                    -Name $Assignment.name
 
 
-            if (
-                ($Assignment.PSObject.Properties.Name -contains "tags") -and
-                ($null -ne $Assignment.tags) -and
-                (@($Assignment.tags).Count -gt 0)
+            foreach (
+                $TagConfig in
+                @($Assignment.tags)
             ) {
 
-                foreach (
-                    $TagConfig in @($Assignment.tags)
-                ) {
+                $Tag =
+                    Get-ExactTag `
+                        -CategoryName `
+                            $TagConfig.category `
+                        -TagName `
+                            $TagConfig.tag
 
-                    $Tag = Get-ExactTag `
-                        -CategoryName $TagConfig.category `
-                        -TagName $TagConfig.tag
 
-                    if (-not $Tag) {
+                if (-not $Tag) {
 
-                        throw (
-                            "Tag '$($TagConfig.category)/" +
-                            "$($TagConfig.tag)' referenced by " +
-                            "'$($Assignment.name)' does not exist."
-                        )
-                    }
-
-                    Set-TagIfMissing `
-                        -Entity $Entity `
-                        -Tag $Tag
+                    throw (
+                        "Tag '$($TagConfig.category)/" +
+                        "$($TagConfig.tag)' does not exist."
+                    )
                 }
-            }
-            else {
 
-                Write-Skip (
-                    "No tags configured for object " +
-                    "'$($Assignment.name)'"
-                )
+
+                Set-TagIfMissing `
+                    -Entity $Entity `
+                    -Tag $Tag
             }
         }
     }
     else {
 
-        Write-Skip "No vCenter tag assignments configured"
+        Write-Skip (
+            "No vCenter tag assignments configured"
+        )
     }
 
 
@@ -1714,9 +3446,16 @@ try {
     # ========================================================
 
     if (
-        ($Config.PSObject.Properties.Name -contains "policies") -and
-        ($null -ne $Config.policies) -and
-        (@($Config.policies).Count -gt 0)
+        (
+            Test-Property `
+                $Config `
+                "policies"
+        ) -and
+        $Config.policies -and
+        (
+            @($Config.policies).Count `
+                -gt 0
+        )
     ) {
 
         Write-Host ""
@@ -1724,21 +3463,28 @@ try {
         Write-Host " vCenter Compute Policies"
         Write-Host "========================================"
 
+
         foreach (
-            $Policy in @($Config.policies)
+            $Policy in
+            @($Config.policies)
         ) {
 
             New-RestComputePolicyIfMissing `
-                -Server $Config.vcenter.server `
-                -Headers $RestHeaders `
-                -Policy $Policy `
+                -Server `
+                    $Config.vcenter.server `
+                -Headers `
+                    $RestHeaders `
+                -Policy `
+                    $Policy `
                 -IgnoreCertificateErrors `
                     $IgnoreCertErrors
         }
     }
     else {
 
-        Write-Skip "No vCenter compute policies configured"
+        Write-Skip (
+            "No vCenter compute policies configured"
+        )
     }
 
 
@@ -1748,9 +3494,16 @@ try {
 
     if (
         $VcfaConfigured -and
-        ($Config.PSObject.Properties.Name -contains "infrastructure_policies") -and
-        ($null -ne $Config.infrastructure_policies) -and
-        (@($Config.infrastructure_policies).Count -gt 0)
+        (
+            Test-Property `
+                $Config `
+                "infrastructure_policies"
+        ) -and
+        $Config.infrastructure_policies -and
+        (
+            @($Config.infrastructure_policies).Count `
+                -gt 0
+        )
     ) {
 
         Write-Host ""
@@ -1758,54 +3511,48 @@ try {
         Write-Host " VCFA Infrastructure Policies"
         Write-Host "========================================"
 
+
         foreach (
-            $Policy in @(
-                $Config.infrastructure_policies
-            )
+            $Policy in
+            @($Config.infrastructure_policies)
         ) {
 
             if (
-                -not (
-                    $Policy.PSObject.Properties.Name `
-                        -contains "vc_compute_policy_name"
-                ) -or
-                [string]::IsNullOrWhiteSpace(
-                    [string]$Policy.vc_compute_policy_name
-                )
+                Test-Property `
+                    $Policy `
+                    "vc_compute_policy_name"
             ) {
 
-                throw (
-                    "VCFA infrastructure policy " +
-                    "'$($Policy.name)' must define " +
-                    "vc_compute_policy_name."
-                )
+                $VCPolicy =
+                    Get-RestComputePolicy `
+                        -Server `
+                            $Config.vcenter.server `
+                        -Headers `
+                            $RestHeaders `
+                        -Name `
+                            $Policy.vc_compute_policy_name `
+                        -IgnoreCertificateErrors `
+                            $IgnoreCertErrors
+
+
+                if (-not $VCPolicy) {
+
+                    throw (
+                        "Referenced vCenter compute policy " +
+                        "'$($Policy.vc_compute_policy_name)' " +
+                        "does not exist."
+                    )
+                }
             }
 
-            $VCPolicy = Get-RestComputePolicy `
-                -Server $Config.vcenter.server `
-                -Headers $RestHeaders `
-                -Name $Policy.vc_compute_policy_name `
-                -IgnoreCertificateErrors `
-                    $IgnoreCertErrors
-
-            if (-not $VCPolicy) {
-
-                throw (
-                    "Referenced vCenter compute policy " +
-                    "'$($Policy.vc_compute_policy_name)' " +
-                    "does not exist."
-                )
-            }
-
-            Write-Info (
-                "Verified vCenter compute policy " +
-                "'$($Policy.vc_compute_policy_name)'"
-            )
 
             New-VcfaInfrastructurePolicyIfMissing `
-                -Server $Config.vcfa.server `
-                -Headers $VcfaHeaders `
-                -Policy $Policy `
+                -Server `
+                    $Config.vcfa.server `
+                -Headers `
+                    $VcfaHeaders `
+                -Policy `
+                    $Policy `
                 -IgnoreCertificateErrors `
                     $VcfaIgnoreCertErrors
         }
@@ -1813,77 +3560,270 @@ try {
     elseif ($VcfaConfigured) {
 
         Write-Skip (
-            "No VCFA infrastructure policies defined"
+            "No VCFA infrastructure policies configured"
         )
     }
 
 
     # ========================================================
-    # vCenter Compute Policy Summary - ONLY IF POLICIES CONFIGURED
-    # ========================================================
-
-    if (
-        ($Config.PSObject.Properties.Name -contains "policies") -and
-        ($null -ne $Config.policies) -and
-        (@($Config.policies).Count -gt 0)
-    ) {
-
-        Write-Host ""
-        Write-Host "========================================"
-        Write-Host " vCenter Compute Policy Summary"
-        Write-Host "========================================"
-
-        $VCPolicies = Invoke-ApiRest `
-            -Uri (
-                "https://$($Config.vcenter.server)" +
-                "/api/vcenter/compute/policies"
-            ) `
-            -Method GET `
-            -Headers $RestHeaders `
-            -IgnoreCertificateErrors `
-                $IgnoreCertErrors
-
-        $VCPolicies |
-            Select-Object `
-                name,
-                policy,
-                capability,
-                description |
-            Format-Table -AutoSize
-    }
-
-
-    # ========================================================
-    # VCFA Summary
+    # VCFA Tenants - OPTIONAL
     # ========================================================
 
     if (
         $VcfaConfigured -and
-        ($Config.PSObject.Properties.Name -contains "infrastructure_policies") -and
-        ($null -ne $Config.infrastructure_policies) -and
-        (@($Config.infrastructure_policies).Count -gt 0)
+        (
+            Test-Property `
+                $Config `
+                "tenants"
+        ) -and
+        $Config.tenants -and
+        (
+            @($Config.tenants).Count `
+                -gt 0
+        )
     ) {
 
         Write-Host ""
         Write-Host "========================================"
-        Write-Host " VCFA Infrastructure Policy Summary"
+        Write-Host " VCFA Tenants"
         Write-Host "========================================"
 
-        $InfraPolicies =
-            Get-VcfaInfrastructurePolicies `
-                -Server $Config.vcfa.server `
-                -Headers $VcfaHeaders `
-                -IgnoreCertificateErrors `
-                    $VcfaIgnoreCertErrors
 
-        $InfraPolicies |
-            Select-Object `
-                name,
-                vcComputePolicyName,
-                isMandatory,
-                creationStatus,
-                syncedToVCenters |
-            Format-Table -AutoSize
+        foreach (
+            $TenantConfig in
+            @($Config.tenants)
+        ) {
+
+            # ------------------------------------------------
+            # Tenant
+            # ------------------------------------------------
+
+            $Tenant =
+                Get-OrCreateVcfaTenant `
+                    -Server `
+                        $Config.vcfa.server `
+                    -Headers `
+                        $VcfaHeaders `
+                    -Tenant `
+                        $TenantConfig `
+                    -IgnoreCertificateErrors `
+                        $VcfaIgnoreCertErrors
+
+
+            Write-Info (
+                "Tenant '$($Tenant.name)' " +
+                "[$($Tenant.id)]"
+            )
+
+
+            # ------------------------------------------------
+            # Regional Quota
+            # ------------------------------------------------
+
+            $RegionQuota = $null
+            $Region = $null
+
+
+            if (
+                Test-Property `
+                    $TenantConfig `
+                    "regional_quota"
+            ) {
+
+                $RegionQuota =
+                    New-VcfaRegionQuotaIfMissing `
+                        -Server `
+                            $Config.vcfa.server `
+                        -Headers `
+                            $VcfaHeaders `
+                        -Tenant `
+                            $Tenant `
+                        -QuotaConfig `
+                            $TenantConfig.regional_quota `
+                        -IgnoreCertificateErrors `
+                            $VcfaIgnoreCertErrors
+
+
+                $Region =
+                    Get-VcfaRegion `
+                        -Server `
+                            $Config.vcfa.server `
+                        -Headers `
+                            $VcfaHeaders `
+                        -Name `
+                            $TenantConfig.regional_quota.region `
+                        -IgnoreCertificateErrors `
+                            $VcfaIgnoreCertErrors
+            }
+            else {
+
+                Write-Skip (
+                    "No regional quota configured " +
+                    "for '$($Tenant.name)'"
+                )
+            }
+
+
+            # ------------------------------------------------
+            # Region Resources
+            # ------------------------------------------------
+
+            if (
+                $RegionQuota -and
+                (
+                    Test-Property `
+                        $TenantConfig `
+                        "resources"
+                )
+            ) {
+
+                $Resources =
+                    $TenantConfig.resources
+
+
+                # --------------------------------------------
+                # VM Classes
+                # --------------------------------------------
+
+                if (
+                    Test-Property `
+                        $Resources `
+                        "vm_classes"
+                ) {
+
+                    Set-VcfaVdcVmClasses `
+                        -Server `
+                            $Config.vcfa.server `
+                        -Headers `
+                            $VcfaHeaders `
+                        -Vdc `
+                            $RegionQuota `
+                        -Config `
+                            $Resources.vm_classes `
+                        -IgnoreCertificateErrors `
+                            $VcfaIgnoreCertErrors
+                }
+
+
+                # --------------------------------------------
+                # Storage Classes
+                # --------------------------------------------
+
+                if (
+                    Test-Property `
+                        $Resources `
+                        "storage_classes"
+                ) {
+
+                    Set-VcfaVdcStorageClasses `
+                        -Server `
+                            $Config.vcfa.server `
+                        -Headers `
+                            $VcfaHeaders `
+                        -Vdc `
+                            $RegionQuota `
+                        -Config `
+                            $Resources.storage_classes `
+                        -IgnoreCertificateErrors `
+                            $VcfaIgnoreCertErrors
+                }
+
+
+                # --------------------------------------------
+                # Infrastructure Policies
+                # --------------------------------------------
+
+                if (
+                    Test-Property `
+                        $Resources `
+                        "infra_policies"
+                ) {
+
+                    Set-VcfaVdcInfraPolicies `
+                        -Server `
+                            $Config.vcfa.server `
+                        -Headers `
+                            $VcfaHeaders `
+                        -Vdc `
+                            $RegionQuota `
+                        -Config `
+                            $Resources.infra_policies `
+                        -IgnoreCertificateErrors `
+                            $VcfaIgnoreCertErrors
+                }
+            }
+
+
+            # ------------------------------------------------
+            # External Distributed VLAN Connection
+            # ------------------------------------------------
+
+            if (
+                $Region -and
+                (
+                    Test-Property `
+                        $TenantConfig `
+                        "external_connection"
+                ) -and
+                -not [string]::IsNullOrWhiteSpace(
+                    [string]$TenantConfig.external_connection
+                )
+            ) {
+
+                Set-VcfaExternalConnection `
+                    -Server `
+                        $Config.vcfa.server `
+                    -Headers `
+                        $VcfaHeaders `
+                    -Tenant `
+                        $Tenant `
+                    -Region `
+                        $Region `
+                    -ConnectionName `
+                        $TenantConfig.external_connection `
+                    -IgnoreCertificateErrors `
+                        $VcfaIgnoreCertErrors
+            }
+
+
+            # ------------------------------------------------
+            # First User
+            # ------------------------------------------------
+
+            if (
+                Test-Property `
+                    $TenantConfig `
+                    "first_user"
+            ) {
+
+                New-VcfaFirstUserIfMissing `
+                    -Server `
+                        $Config.vcfa.server `
+                    -Headers `
+                        $VcfaHeaders `
+                    -Tenant `
+                        $Tenant `
+                    -UserConfig `
+                        $TenantConfig.first_user `
+                    -ConfigDirectory `
+                        $ConfigDirectory `
+                    -IgnoreCertificateErrors `
+                        $VcfaIgnoreCertErrors
+            }
+            else {
+
+                Write-Skip (
+                    "No first user configured for " +
+                    "'$($Tenant.name)'"
+                )
+            }
+        }
+    }
+    elseif ($VcfaConfigured) {
+
+        Write-Skip (
+            "No VCFA tenants configured"
+        )
     }
 
 
@@ -1895,7 +3835,7 @@ try {
 finally {
 
     # ========================================================
-    # Close vCenter REST Session
+    # Close REST session
     # ========================================================
 
     if ($RestHeaders) {
