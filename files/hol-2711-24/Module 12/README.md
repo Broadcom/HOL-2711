@@ -4,7 +4,7 @@ Run from the console, by hand. This is the "what if on-prem worked like the
 public cloud" moment: declare a machine, `apply`, get an address.
 
 ```bash
-cd demo/hol-data
+cd ~/Documents/files/hol-2711-24/"Module 12"
 
 cat > terraform.tfvars <<'EOF'
 vcfa_url      = "https://<vcfa>"
