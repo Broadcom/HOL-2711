@@ -57,7 +57,7 @@ resources:
                 - 10.96.0.0/12
           topology:
             class: builtin-generic-v3.3.0
-            version: v1.33.6---vmware.1-fips-vkr.2
+            version: v1.35.5---vmware.1-vkr.1
             variables:
               - name: vsphereOptions
                 value:
@@ -69,7 +69,7 @@ resources:
                     enabled: true
                     renewalDaysBeforeExpiry: 90
               - name: vmClass
-                value: best-effort-small
+                value: best-effort-medium
               - name: storageClass
                 value: vsan-default-storage-policy
             controlPlane:
