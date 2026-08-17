@@ -70,37 +70,96 @@ def http(method, url, token_hdr=None, body=None, ok=(200, 201)):
 
 
 def read_secret(path):
-    with open(path) as f:
-        return f.read().strip()
+    """Never raises: a missing or unreadable credential file yields ""
+    so the caller reports FAILED for its own item instead of killing
+    the run."""
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except Exception:
+        return ""
 
 
 # --- 1. Argo CD certificate ------------------------------------------------
 
+def lab_ca_pem():
+    """The lab root CA, from whichever source this pod actually has.
+
+    1. the staged cert file (present on every pod observed so far)
+    2. the PEM embedded in the staged Argo TLS ConfigMap
+    3. the CA presented by the GitLab server itself
+    Returns (pem, source) or (None, reason).
+    """
+    try:
+        pem = open(CA_FILE).read()
+        if "BEGIN CERTIFICATE" in pem:
+            return pem, "rootca.cer"
+    except Exception:
+        pass
+    cm = f"{HOME}/Documents/files/hol-2711-24/Argo/argocd-tls-certs-cm.yaml"
+    try:
+        text = open(cm).read()
+        start = text.index("-----BEGIN CERTIFICATE-----")
+        end = text.index("-----END CERTIFICATE-----") + len("-----END CERTIFICATE-----")
+        block = text[start:end]
+        pem = "\n".join(l.strip() for l in block.splitlines()) + "\n"
+        return pem, "argocd-tls-certs-cm.yaml"
+    except Exception:
+        pass
+    try:
+        p = subprocess.run(["openssl", "s_client", "-showcerts",
+                            "-connect", f"{GITLAB_HOST}:443"],
+                           input="", capture_output=True, text=True, timeout=30)
+        blocks = []
+        cur = []
+        for line in p.stdout.splitlines():
+            if "BEGIN CERTIFICATE" in line:
+                cur = [line]
+            elif "END CERTIFICATE" in line and cur:
+                cur.append(line)
+                blocks.append("\n".join(cur) + "\n")
+                cur = []
+            elif cur:
+                cur.append(line)
+        if blocks:
+            return blocks[-1], "gitlab TLS chain"
+    except Exception:
+        pass
+    return None, "no CA source available"
+
+
 def argo_cert(check):
     pw = read_secret(PW_FILE)
+    if not pw:
+        report("argo-cert", "FAILED", f"cannot read {PW_FILE}")
+        return
     code, resp = http("POST", f"{ARGO}/api/v1/session",
                       body={"username": "admin", "password": pw})
-    if code != 200:
-        report("argo-cert", "FAILED", f"session {code}: {resp}")
+    if code != 200 or not isinstance(resp, dict) or not resp.get("token"):
+        report("argo-cert", "FAILED", f"session {code}: {str(resp)[:80]}")
         return
     tok = ("Authorization", f"Bearer {resp['token']}")
     q = urllib.parse.urlencode({"hostNamePattern": GITLAB_HOST,
                                 "certType": "https"})
     code, certs = http("GET", f"{ARGO}/api/v1/certificates?{q}", tok)
-    have = code == 200 and (certs.get("items") or [])
+    have = (code == 200 and isinstance(certs, dict)
+            and (certs.get("items") or []))
     if have:
         report("argo-cert", "OK", "gitlab.vcf.lab TLS cert present")
         return
     if check:
         report("argo-cert", "WOULD-FIX", "add rootca.cer for gitlab.vcf.lab")
         return
-    pem = open(CA_FILE).read()
+    pem, source = lab_ca_pem()
+    if pem is None:
+        report("argo-cert", "FAILED", source)
+        return
     body = {"items": [{"serverName": GITLAB_HOST, "certType": "https",
                        "certData": base64.b64encode(pem.encode()).decode()}]}
     code, resp = http("POST", f"{ARGO}/api/v1/certificates?upsert=true",
                       tok, body)
     if code == 200:
-        report("argo-cert", "FIXED", "rootca.cer added for gitlab.vcf.lab")
+        report("argo-cert", "FIXED", f"CA added for gitlab.vcf.lab ({source})")
     else:
         report("argo-cert", "FAILED", f"POST {code}: {resp}")
 
@@ -108,7 +167,7 @@ def argo_cert(check):
 # --- GitLab helpers --------------------------------------------------------
 
 def gl_hdr():
-    return ("PRIVATE-TOKEN", read_secret(PAT_FILE))
+    return ("PRIVATE-TOKEN", read_secret(PAT_FILE) or "missing-pat")
 
 
 def gl_raw(project, path):
@@ -145,8 +204,10 @@ def gl_commit(project, path, content, message):
     try:
         code, resp = http("POST", url, gl_hdr(), body)
     finally:
-        push = (prot["push_access_levels"] or [{}])[0].get("access_level", 40)
-        merge = (prot["merge_access_levels"] or [{}])[0].get("access_level", 40)
+        push = ((prot.get("push_access_levels") or [{}])[0]
+                .get("access_level", 40))
+        merge = ((prot.get("merge_access_levels") or [{}])[0]
+                 .get("access_level", 40))
         q = urllib.parse.urlencode({"name": "main",
                                     "push_access_level": push,
                                     "merge_access_level": merge})
@@ -281,7 +342,11 @@ def tfvars_fix(check):
     else:
         report("tfvars", "FAILED", "terraform.tfvars not found")
         return
-    cur = open(p).read()
+    try:
+        cur = open(p).read()
+    except Exception as exc:
+        report("tfvars", "FAILED", f"unreadable: {exc}")
+        return
     if f'vcfa_user     = "{PERSONA}"' in cur:
         report("tfvars", "OK", "persona already set")
         return
@@ -291,15 +356,24 @@ def tfvars_fix(check):
     if check:
         report("tfvars", "WOULD-FIX", f"set vcfa_user in {p}")
         return
-    open(p, "w").write(cur.replace('vcfa_user     = "admin"',
-                                   f'vcfa_user     = "{PERSONA}"'))
+    try:
+        open(p, "w").write(cur.replace('vcfa_user     = "admin"',
+                                       f'vcfa_user     = "{PERSONA}"'))
+    except Exception as exc:
+        report("tfvars", "FAILED", f"unwritable: {exc}")
+        return
     report("tfvars", "FIXED", p)
 
 
 # --- 6. stale host key -----------------------------------------------------
 
 def hostkey_fix(check):
-    r = subprocess.run(["ssh-keygen", "-F", CP_IP], capture_output=True)
+    try:
+        r = subprocess.run(["ssh-keygen", "-F", CP_IP], capture_output=True,
+                           timeout=30)
+    except Exception as exc:
+        report("host-key", "FAILED", f"ssh-keygen unavailable: {exc}")
+        return
     if r.returncode != 0:
         report("host-key", "OK", "no stale entry")
         return
@@ -368,15 +442,28 @@ type: kubernetes.io/service-account-token
 
 
 def _ssh(host, password, command):
+    """Returns (rc, stdout, stderr); never raises. rc 127 means the ssh
+    tooling itself is unavailable, 124 means it timed out."""
     r, w = os.pipe()
     os.write(w, (password + "\n").encode())
     os.close(w)
-    p = subprocess.run(["sshpass", f"-d{r}", "ssh"] + SSH_OPTS +
-                       [f"root@{host}", command],
-                       capture_output=True, text=True, pass_fds=(r,),
-                       timeout=120)
-    os.close(r)
-    return p.returncode, p.stdout, p.stderr
+    try:
+        p = subprocess.run(["sshpass", f"-d{r}", "ssh"] + SSH_OPTS +
+                           [f"root@{host}", command],
+                           capture_output=True, text=True, pass_fds=(r,),
+                           timeout=120)
+        return p.returncode, p.stdout, p.stderr
+    except subprocess.TimeoutExpired:
+        return 124, "", f"timed out contacting {host}"
+    except FileNotFoundError as exc:
+        return 127, "", f"ssh tooling missing: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        return 1, "", str(exc)[:160]
+    finally:
+        try:
+            os.close(r)
+        except OSError:
+            pass
 
 
 def registrar_cred(check):
@@ -385,7 +472,8 @@ def registrar_cred(check):
     code, cur = http("GET",
                      f"{GITLAB}/api/v4/projects/{proj}/variables/{var}",
                      gl_hdr())
-    if code == 200 and (cur.get("value") or "").strip():
+    if (code == 200 and isinstance(cur, dict)
+            and (cur.get("value") or "").strip()):
         report("registrar", "OK", "CI variable already present")
         return
     if check:
@@ -393,6 +481,9 @@ def registrar_cred(check):
                f"create {SA} in {ARGO_NS} and store {var}")
         return
     pw = read_secret(PW_FILE)
+    if not pw:
+        report("registrar", "FAILED", f"cannot read {PW_FILE}")
+        return
     rc, out, err = _ssh(VC, pw, "/usr/lib/vmware-wcp/decryptK8Pwd.py")
     cp_ip, cp_pw = "", ""
     for line in out.splitlines():
@@ -414,7 +505,10 @@ def registrar_cred(check):
     rc, out, err = _ssh(cp_ip, cp_pw,
                         f"{kc} kubectl -n {ARGO_NS} get secret {SA}-token "
                         "-o jsonpath='{.data.token}'")
-    token = base64.b64decode(out.strip()).decode() if out.strip() else ""
+    try:
+        token = base64.b64decode(out.strip()).decode() if out.strip() else ""
+    except Exception:
+        token = ""
     if not token:
         report("registrar", "FAILED", "token secret empty")
         return
@@ -430,6 +524,28 @@ def registrar_cred(check):
            else f"variable {code}: {resp}")
 
 
+def preflight():
+    """Report what this pod is missing before anything is attempted. Never
+    fatal on its own: each action still reports its own outcome."""
+    missing = [p for p in (PW_FILE, PAT_FILE) if not read_secret(p)]
+    for p in missing:
+        report("preflight", "FAILED", f"credential file unreadable: {p}")
+    tools = [t for t in ("kubectl", "ssh-keygen", "sshpass")
+             if subprocess.run(["which", t], capture_output=True).returncode]
+    if tools:
+        report("preflight", "FAILED", f"tools missing: {', '.join(tools)}")
+
+
+def guarded(fn, name, check):
+    """Run one action; an unexpected exception becomes that action's own
+    FAILED line so the remaining actions still run."""
+    try:
+        fn(check)
+    except Exception as exc:  # noqa: BLE001
+        report(name, "FAILED", f"unexpected {type(exc).__name__}: "
+                               f"{str(exc)[:120]}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true",
@@ -437,14 +553,22 @@ def main():
     args = ap.parse_args()
     mode = "CHECK" if args.check else "APPLY"
     print(f"mod12-prep {mode} on {os.uname().nodename}")
-    argo_cert(args.check)
-    gitlab_sync(args.check)
-    ci_vars(args.check)
-    tfvars_fix(args.check)
-    hostkey_fix(args.check)
-    registrar_cred(args.check)
+    preflight()
+    for fn, name in ((argo_cert, "argo-cert"), (gitlab_sync, "gitlab-sync"),
+                     (ci_vars, "ci-vars"), (tfvars_fix, "tfvars"),
+                     (hostkey_fix, "host-key"),
+                     (registrar_cred, "registrar")):
+        guarded(fn, name, args.check)
     bad = [r for r in RESULTS if r[1] == "FAILED"]
     print(f"done: {len(RESULTS)} items, {len(bad)} failed")
+    if bad:
+        print("NOT READY. Fix these, then run again (the script is safe to "
+              "re-run and will skip what is already correct):")
+        for item, _, detail in bad:
+            print(f"  - {item}: {detail}")
+    else:
+        print("READY. The student still replaces the password placeholder "
+              "in terraform.tfvars; everything else is in place.")
     sys.exit(1 if bad else 0)
 
 
