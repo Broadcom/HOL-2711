@@ -151,8 +151,6 @@ def gl_commit(project, path, content, message):
     return code, resp
 
 
-# --- 2. readiness probe ----------------------------------------------------
-
 PROBE_OLD = """          readinessProbe:
             httpGet: {path: /, port: 80}
             initialDelaySeconds: 10
@@ -165,66 +163,84 @@ PROBE_NEW = """          readinessProbe:
             timeoutSeconds: 10
 """
 
+# --- 2+3. GitLab files: converge live repos to desired content ------------
+#
+# Desired content is the console labfiles copy run through idempotent
+# transforms. On pods shipped before the labfiles fixes landed, the
+# transforms generate the fix; on pods whose labfiles already carry it,
+# they are no-ops and the labfiles copy IS the desired state. Whole-file
+# commit on difference, so the live repo converges regardless of what
+# it currently holds.
 
-def probe_fix(check):
-    proj, path = "hol-scitech-gitops/apps", "apps/hol-wordpress/manifest.yaml"
-    cur = gl_raw(proj, path)
-    if cur is None:
-        report("probe", "FAILED", "cannot read apps manifest")
-        return
-    if "timeoutSeconds" in cur:
-        report("probe", "OK", "timeoutSeconds already set")
-        return
-    if PROBE_OLD not in cur:
-        report("probe", "FAILED", "probe block shape unexpected; not touching")
-        return
-    if check:
-        report("probe", "WOULD-FIX", "add timeoutSeconds: 10")
-        return
-    code, resp = gl_commit(proj, path, cur.replace(PROBE_OLD, PROBE_NEW),
-                           "hol-wordpress: readiness probe timeoutSeconds 10 [skip ci]")
-    report("probe", "FIXED" if code == 201 else "FAILED",
-           "" if code == 201 else f"{code}: {resp}")
+LABROOT = f"{HOME}/Documents/files/hol-2711-24/GitLab"
+
+def transform_probe(text):
+    if "timeoutSeconds" in text:
+        return text
+    if PROBE_OLD not in text:
+        return None
+    return text.replace(PROBE_OLD, PROBE_NEW)
 
 
-# --- 3. seed job uncomment -------------------------------------------------
+def transform_ci(text):
+    lines = text.splitlines(keepends=True)
+    if not any(l.startswith("seed-db-credentials:") for l in lines):
+        try:
+            start = next(i for i, l in enumerate(lines)
+                         if l.rstrip("\n") == "# seed-db-credentials:")
+        except StopIteration:
+            return None
+        end = start
+        while end < len(lines):
+            s = lines[end].rstrip("\n")
+            if ("ENDS HERE" in s or s.startswith("# register-with-argocd")
+                    or s == "" or not s.startswith("#")):
+                break
+            end += 1
+        lines[start:end] = [
+            (l[2:] if l.startswith("# ") else
+             ("\n" if l.rstrip("\n") == "#" else l))
+            for l in lines[start:end]]
+    text = "".join(lines)
+    old_inv = ('#     - python3 argocd_register_cluster.py --cluster '
+               '"$CLUSTER" --namespace "$SUPERVISOR_NS" --name "$CLUSTER"')
+    if old_inv + "\n" in text + "\n" and "--argocd-namespace" not in text:
+        text = text.replace(old_inv, old_inv + " --argocd-namespace ns-argocd")
+    return text
 
-def seed_fix(check):
-    proj, path = "hol-scitech-gitops/infra", ".gitlab-ci.yml"
-    cur = gl_raw(proj, path)
-    if cur is None:
-        report("seed-job", "FAILED", "cannot read .gitlab-ci.yml")
-        return
-    lines = cur.splitlines(keepends=True)
-    if any(l.startswith("seed-db-credentials:") for l in lines):
-        report("seed-job", "OK", "already active")
-        return
-    try:
-        start = next(i for i, l in enumerate(lines)
-                     if l.rstrip("\n") == "# seed-db-credentials:")
-    except StopIteration:
-        report("seed-job", "FAILED", "commented seed job not found")
-        return
-    end = start
-    while end < len(lines):
-        stripped = lines[end].rstrip("\n")
-        if "ENDS HERE" in stripped or stripped.startswith("# register-with-argocd"):
-            break
-        if stripped == "" or not stripped.startswith("#"):
-            break
-        end += 1
-    changed = lines[:start] + [
-        (l[2:] if l.startswith("# ") else ("\n" if l.rstrip("\n") == "#" else l))
-        for l in lines[start:end]] + lines[end:]
-    new = "".join(changed)
-    if check:
-        n = end - start
-        report("seed-job", "WOULD-FIX", f"uncomment {n} lines")
-        return
-    code, resp = gl_commit(proj, path, new,
-                           "activate seed-db-credentials [skip ci]")
-    report("seed-job", "FIXED" if code == 201 else "FAILED",
-           "" if code == 201 else f"{code}: {resp}")
+
+SYNC_FILES = [
+    ("probe", "hol-scitech-gitops/apps", "apps/hol-wordpress/manifest.yaml",
+     f"{LABROOT}/apps/apps/hol-wordpress/manifest.yaml", transform_probe,
+     "hol-wordpress: readiness probe timeoutSeconds 10 [skip ci]"),
+    ("seed-job", "hol-scitech-gitops/infra", ".gitlab-ci.yml",
+     f"{LABROOT}/infra/.gitlab-ci.yml", transform_ci,
+     "activate seed-db-credentials [skip ci]"),
+]
+
+
+def gitlab_sync(check):
+    for item, proj, path, local, transform, msg in SYNC_FILES:
+        if not os.path.exists(local):
+            report(item, "FAILED", f"labfiles copy missing: {local}")
+            continue
+        desired = transform(open(local).read())
+        if desired is None:
+            report(item, "FAILED", "labfiles copy shape unexpected; not touching")
+            continue
+        live = gl_raw(proj, path)
+        if live is None:
+            report(item, "FAILED", f"cannot read live {proj}:{path}")
+            continue
+        if live == desired:
+            report(item, "OK", "live matches desired")
+            continue
+        if check:
+            report(item, "WOULD-FIX", "replace live file with desired content")
+            continue
+        code, resp = gl_commit(proj, path, desired, msg)
+        report(item, "FIXED" if code == 201 else "FAILED",
+               "" if code == 201 else f"{code}: {resp}")
 
 
 # --- 4. CI variables -------------------------------------------------------
@@ -299,8 +315,7 @@ def main():
     mode = "CHECK" if args.check else "APPLY"
     print(f"mod12-prep {mode} on {os.uname().nodename}")
     argo_cert(args.check)
-    probe_fix(args.check)
-    seed_fix(args.check)
+    gitlab_sync(args.check)
     ci_vars(args.check)
     tfvars_fix(args.check)
     hostkey_fix(args.check)
