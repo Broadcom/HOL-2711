@@ -59,6 +59,10 @@ spec:
             httpGet: {path: /, port: 80}
             initialDelaySeconds: 10
             periodSeconds: 5
+            # Before installation, / renders the installer in ~6 s;
+            # the 1 s default timeout never passes and the LB never
+            # gets an endpoint.
+            timeoutSeconds: 10
           resources:
             requests: {cpu: 100m, memory: 256Mi}
             limits: {memory: 1Gi}

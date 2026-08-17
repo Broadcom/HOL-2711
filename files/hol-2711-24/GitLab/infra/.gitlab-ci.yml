@@ -109,7 +109,7 @@ apply:
 #     - *kube_login
 #     - CLUSTER=$(jq -r '.cluster_name.value' tf-outputs.json)
 #     - echo "registering $CLUSTER with Argo CD"
-#     - python3 argocd_register_cluster.py --cluster "$CLUSTER" --namespace "$SUPERVISOR_NS" --name "$CLUSTER"
+#     - python3 argocd_register_cluster.py --cluster "$CLUSTER" --namespace "$SUPERVISOR_NS" --name "$CLUSTER" --argocd-namespace ns-argocd
 #
 # # Hands the database credential to the cluster that was just built. The
 # # database was created in Module 1 and lives on its own VM, in its own
@@ -120,13 +120,13 @@ apply:
 # #
 # # This is also what keeps the password out of git. demo/hol-apps refers to
 # # the Secret by name; only the platform and this pipeline see its value.
-# seed-db-credentials:
-#   stage: seed
-#   tags: [vcf]
-#   script:
-#     - *kube_login
-#     - CLUSTER=$(jq -r '.cluster_name.value' tf-outputs.json)
-#     - bash seed_db_credentials.sh "$CLUSTER" "$SUPERVISOR_NS" hol-wordpress
+seed-db-credentials:
+  stage: seed
+  tags: [vcf]
+  script:
+    - *kube_login
+    - CLUSTER=$(jq -r '.cluster_name.value' tf-outputs.json)
+    - bash seed_db_credentials.sh "$CLUSTER" "$SUPERVISOR_NS" hol-wordpress
 
 # ===========================================================================
 # MODULE 3 ENDS HERE

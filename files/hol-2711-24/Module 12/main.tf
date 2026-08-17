@@ -122,13 +122,19 @@ locals {
           [mysqld]
           bind-address = 0.0.0.0
           mysqlx-bind-address = 127.0.0.1
+          # WordPress 4.8.3 era clients cannot negotiate MySQL 8 defaults:
+          # utf8mb4_0900 collation and caching_sha2_password both fail the
+          # handshake. Pin the compatible charset and auth plugin.
+          character-set-server = utf8mb4
+          collation-server = utf8mb4_unicode_ci
+          default_authentication_plugin = mysql_native_password
     runcmd:
       - systemctl enable --now mysql
       - systemctl restart mysql
       # MySQL 8 on Ubuntu authenticates local root through auth_socket, so
       # these run as root with no password and no password on a command line.
       - mysql -e "CREATE DATABASE IF NOT EXISTS ${var.db_name} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-      - mysql -e "CREATE USER IF NOT EXISTS '${var.db_user}'@'%' IDENTIFIED BY '${random_password.db.result}';"
+      - mysql -e "CREATE USER IF NOT EXISTS '${var.db_user}'@'%' IDENTIFIED WITH mysql_native_password BY '${random_password.db.result}';"
       - mysql -e "GRANT ALL PRIVILEGES ON ${var.db_name}.* TO '${var.db_user}'@'%'; FLUSH PRIVILEGES;"
       - touch /var/lib/cloud/hol-mysql-ready
   CLOUDCFG
