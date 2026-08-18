@@ -99,7 +99,9 @@
   "vcfa": {
     "server": "auto-a.site-a.vcf.lab",
     "api_token_file": "/home/holuser/Desktop/API Tokens/API-Provider.Admin-VCFA.txt",
-    "ignore_certificate_errors": true
+    "ignore_certificate_errors": true,
+    "compute_policy_sync_timeout_seconds": 600,
+    "compute_policy_sync_poll_seconds": 10
     },
     "infrastructure_policies": [
     {

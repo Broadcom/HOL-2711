@@ -91,7 +91,7 @@ resources:
               cidrBlocks: ['10.96.0.0/12']
           topology:
             class: builtin-generic-v3.3.0
-            version: v1.33.6---vmware.1-fips-vkr.2
+            version: v1.35.5---vmware.1-vkr.1
             variables:
               - name: vsphereOptions
                 value:
@@ -103,7 +103,7 @@ resources:
                     enabled: true
                     renewalDaysBeforeExpiry: 90
               - name: vmClass
-                value: best-effort-small
+                value: best-effort-medium
               - name: storageClass
                 value: vsan-default-storage-policy
             controlPlane:
@@ -138,9 +138,6 @@ resources:
           name: ${to_lower(input.vks_name)}-${env.shortDeploymentId}
       wait:
         conditions:
-          - type: Antrea-ReconcileSucceeded
-            status: 'True'
-            indicatesFailure: false
           - type: Guest-Cluster-Auth-Service-ReconcileSucceeded
             status: 'True'
             indicatesFailure: false
@@ -245,6 +242,11 @@ resources:
                                   - {name: WORDPRESS_DB_NAME, value: wordpress}
                                   - {name: WORDPRESS_DB_USER, value: wordpress}
                                   - {name: WORDPRESS_DB_PASSWORD, value: "${resource.dbPassword.generatedPassword}"}
+                                  # The install Job pins --url=http://localhost (the LB
+                                  # address is unknowable at install time), which leaves
+                                  # the site unstyled at its real address. Deriving the
+                                  # URL from the request host fixes it at any address.
+                                  - {name: WORDPRESS_CONFIG_EXTRA, value: "define('WP_HOME','http://'.$_SERVER['HTTP_HOST']); define('WP_SITEURL','http://'.$_SERVER['HTTP_HOST']);"}
                                 ports: [{containerPort: 80}]
                                 volumeMounts:
                                   - {name: wpcli, mountPath: /wpcli}

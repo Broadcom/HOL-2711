@@ -7,7 +7,7 @@ spec:
   className: small
   regionName: us-east-a
   vpcName: default-us-east-a
-  description: HOL-2711-24 Module 9 namespace
+  description: HOL-2711-24 Module 11 namespace
   initialClassConfigOverrides:
     zones:
       - name: z-wld-a
