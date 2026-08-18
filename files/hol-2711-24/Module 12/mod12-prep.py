@@ -238,8 +238,9 @@ PROBE_NEW = """          readinessProbe:
 
 LABROOT = f"{HOME}/Documents/files/hol-2711-24/GitLab"
 
-WP_ANCHOR = ("                secretKeyRef: "
-             "{name: hol-db-credentials, key: password}\n")
+# Superseded env-var attempt, still stripped if a repo carries it: the
+# pod's Harbor WordPress image (4.8.3) predates the official image's
+# WORDPRESS_CONFIG_EXTRA support, so the variable is inert there.
 WP_EXTRA = """\
             # WordPress writes the URL it was installed at into its database
             # (siteurl and home) and serves every stylesheet, script and image
@@ -253,16 +254,45 @@ WP_EXTRA = """\
                 define('WP_SITEURL','http://'.$_SERVER['HTTP_HOST']);
 """
 
+WP_HOOK_ANCHOR = "          readinessProbe:\n"
+WP_HOOK = """\
+          # The pod's Harbor WordPress image (4.8.3) predates the official
+          # image's WORDPRESS_CONFIG_EXTRA support, so the URL fix is
+          # written into wp-config.php directly, once the entrypoint has
+          # generated it. WP_HOME/WP_SITEURL from the request host make
+          # the site serve correctly at any load balancer address,
+          # including after a destroy and rebuild, and cover the
+          # localhost case.
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - bash
+                  - -c
+                  - |
+                    f=/var/www/html/wp-config.php
+                    for i in $(seq 1 120); do
+                      [ -s "$f" ] && break
+                      sleep 1
+                    done
+                    sleep 1
+                    grep -q "WP_SITEURL" "$f" 2>/dev/null && exit 0
+                    sed -i "s|^<?php|<?php\\ndefine('WP_HOME','http://'.\\$_SERVER['HTTP_HOST']);\\ndefine('WP_SITEURL','http://'.\\$_SERVER['HTTP_HOST']);|" "$f"
+                    exit 0
+"""
+
 
 def transform_probe(text):
     if "timeoutSeconds" not in text:
         if PROBE_OLD not in text:
             return None
         text = text.replace(PROBE_OLD, PROBE_NEW)
-    if "WORDPRESS_CONFIG_EXTRA" not in text:
-        if WP_ANCHOR not in text:
+    if WP_EXTRA in text:
+        text = text.replace(WP_EXTRA, "")
+    if "postStart" not in text:
+        if WP_HOOK_ANCHOR not in text:
             return None
-        text = text.replace(WP_ANCHOR, WP_ANCHOR + WP_EXTRA, 1)
+        text = text.replace(WP_HOOK_ANCHOR, WP_HOOK + WP_HOOK_ANCHOR, 1)
     return text
 
 
@@ -296,7 +326,7 @@ def transform_ci(text):
 SYNC_FILES = [
     ("probe", "hol-scitech-gitops/apps", "apps/hol-wordpress/manifest.yaml",
      f"{LABROOT}/apps/apps/hol-wordpress/manifest.yaml", transform_probe,
-     "hol-wordpress: probe timeout + WORDPRESS_CONFIG_EXTRA [skip ci]"),
+     "hol-wordpress: probe timeout + URL defines via postStart [skip ci]"),
     ("seed-job", "hol-scitech-gitops/infra", ".gitlab-ci.yml",
      f"{LABROOT}/infra/.gitlab-ci.yml", transform_ci,
      "activate seed-db-credentials [skip ci]"),
