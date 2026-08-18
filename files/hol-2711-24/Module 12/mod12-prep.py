@@ -610,15 +610,14 @@ def main():
                      (registrar_cred, "registrar")):
         guarded(fn, name, args.check)
     bad = [r for r in RESULTS if r[1] == "FAILED"]
-    print(f"done: {len(RESULTS)} items, {len(bad)} failed")
     if bad:
-        print("NOT READY. Fix these, then run again (the script is safe to "
-              "re-run and will skip what is already correct):")
         for item, _, detail in bad:
             print(f"  - {item}: {detail}")
+        print()
+        print("NOT READY: Please ask for help.")
     else:
-        print("READY. The student still replaces the password placeholder "
-              "in terraform.tfvars; everything else is in place.")
+        print()
+        print("READY")
     sys.exit(1 if bad else 0)
 
 
