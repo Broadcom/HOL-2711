@@ -10,8 +10,8 @@ every action checks current state first and is safe to run twice.
 Actions (repair-class only; teaching steps stay in the manual):
   1. Argo CD trusts the lab root CA for gitlab.vcf.lab (API, no ssh).
   2. apps repo: readiness probe timeoutSeconds 10 ([skip ci] commit).
-  3. infra repo: uncomment the seed-db-credentials job ONLY
-     ([skip ci] commit; register-with-argocd stays commented).
+  3. infra repo: converge the live pipeline file to the labfiles
+     copy ([skip ci] commit).
   4. CI variables TF_VAR_vcfa_user / TF_VAR_vcfa_password point at
      the workshop persona.
   5. terraform.tfvars vcfa_user = scitech.gitops (password
