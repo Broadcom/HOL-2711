@@ -46,6 +46,16 @@ spec:
             - name: WORDPRESS_DB_PASSWORD
               valueFrom:
                 secretKeyRef: {name: hol-db-credentials, key: password}
+            # WordPress writes the URL it was installed at into its database
+            # (siteurl and home) and serves every stylesheet, script and image
+            # from that address, so a rebuilt load balancer that comes up on a
+            # new IP leaves the site unstyled. These defines make the URL
+            # follow whatever host the browser used, overriding the stored
+            # rows. Also covers the localhost case.
+            - name: WORDPRESS_CONFIG_EXTRA
+              value: >-
+                define('WP_HOME','http://'.$_SERVER['HTTP_HOST']);
+                define('WP_SITEURL','http://'.$_SERVER['HTTP_HOST']);
           # WordPress generates these eight values at container start if they
           # are not supplied, so each replica ends up with its OWN cookie
           # secrets and a session issued by one pod is rejected by the other.

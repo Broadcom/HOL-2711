@@ -238,12 +238,32 @@ PROBE_NEW = """          readinessProbe:
 
 LABROOT = f"{HOME}/Documents/files/hol-2711-24/GitLab"
 
+WP_ANCHOR = ("                secretKeyRef: "
+             "{name: hol-db-credentials, key: password}\n")
+WP_EXTRA = """\
+            # WordPress writes the URL it was installed at into its database
+            # (siteurl and home) and serves every stylesheet, script and image
+            # from that address, so a rebuilt load balancer that comes up on a
+            # new IP leaves the site unstyled. These defines make the URL
+            # follow whatever host the browser used, overriding the stored
+            # rows. Also covers the localhost case.
+            - name: WORDPRESS_CONFIG_EXTRA
+              value: >-
+                define('WP_HOME','http://'.$_SERVER['HTTP_HOST']);
+                define('WP_SITEURL','http://'.$_SERVER['HTTP_HOST']);
+"""
+
+
 def transform_probe(text):
-    if "timeoutSeconds" in text:
-        return text
-    if PROBE_OLD not in text:
-        return None
-    return text.replace(PROBE_OLD, PROBE_NEW)
+    if "timeoutSeconds" not in text:
+        if PROBE_OLD not in text:
+            return None
+        text = text.replace(PROBE_OLD, PROBE_NEW)
+    if "WORDPRESS_CONFIG_EXTRA" not in text:
+        if WP_ANCHOR not in text:
+            return None
+        text = text.replace(WP_ANCHOR, WP_ANCHOR + WP_EXTRA, 1)
+    return text
 
 
 def transform_ci(text):
@@ -276,7 +296,7 @@ def transform_ci(text):
 SYNC_FILES = [
     ("probe", "hol-scitech-gitops/apps", "apps/hol-wordpress/manifest.yaml",
      f"{LABROOT}/apps/apps/hol-wordpress/manifest.yaml", transform_probe,
-     "hol-wordpress: readiness probe timeoutSeconds 10 [skip ci]"),
+     "hol-wordpress: probe timeout + WORDPRESS_CONFIG_EXTRA [skip ci]"),
     ("seed-job", "hol-scitech-gitops/infra", ".gitlab-ci.yml",
      f"{LABROOT}/infra/.gitlab-ci.yml", transform_ci,
      "activate seed-db-credentials [skip ci]"),
