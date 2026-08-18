@@ -1,0 +1,237 @@
+{
+  "vcenter": {
+    "server": "vc-wld01-a.site-a.vcf.lab",
+    "ignore_certificate_errors": true,
+    "username": "administrator@wld.sso",
+    "password_file": "/home/holuser/Desktop/PASSWORD.txt",
+    "categories": [
+      {
+        "name": "os",
+        "description": "",
+        "cardinality": "Multiple",
+        "entity_types": [
+          "VMHost",
+          "VirtualMachine"
+        ],
+        "tags": [
+          {
+            "name": "linux",
+            "description": "Host running Linux OS VMs"
+          },
+          {
+            "name": "windows",
+            "description": "Host running Windows OS VMs"
+          }
+        ]
+      }
+    ],
+    "assignments": [
+      {
+        "type": "VMHost",
+        "name": "esx-05a.site-a.vcf.lab",
+        "tags": [
+          {
+            "category": "os",
+            "tag": "windows"
+          }
+        ]
+      },
+      {
+        "type": "VMHost",
+        "name": "esx-06a.site-a.vcf.lab",
+        "tags": [
+          {
+            "category": "os",
+            "tag": "linux"
+          }
+        ]
+      },
+      {
+        "type": "VMHost",
+        "name": "esx-07a.site-a.vcf.lab",
+        "tags": [
+          {
+            "category": "os",
+            "tag": "linux"
+          }
+        ]
+      },
+      {
+        "type": "VirtualMachine",
+        "name": "vm-scitech-001",
+        "tags": [
+          {
+            "category": "os",
+            "tag": "linux"
+          }
+        ]
+      }
+    ],
+    "policies": [
+      {
+        "name": "linux-vm-host-affinity",
+        "description": "This policy will keep Linux VMs on hosts licensed for it.",
+        "type": "vm-host-affinity",
+        "vm_tag": {
+          "category": "os",
+          "tag": "linux"
+        },
+        "host_tag": {
+          "category": "os",
+          "tag": "linux"
+        }
+      },
+      {
+        "name": "windows-vm-host-affinity",
+        "description": "This policy will keep Windows VMs on hosts licensed for it.",
+        "type": "vm-host-affinity",
+        "vm_tag": {
+          "category": "os",
+          "tag": "windows"
+        },
+        "host_tag": {
+          "category": "os",
+          "tag": "windows"
+        }
+      }
+    ]
+  },
+  "vcfa": {
+    "server": "auto-a.site-a.vcf.lab",
+    "api_token_file": "/home/holuser/Desktop/API Tokens/API-Provider.Admin-VCFA.txt",
+    "ignore_certificate_errors": true,
+    "compute_policy_sync_timeout_seconds": 600,
+    "compute_policy_sync_poll_seconds": 10,
+    "regions": [
+      {
+        "name": "us-east-a",
+        "description": "Site A Workload Region",
+        "nsx_manager": "nsx-wld01-a.site-a.vcf.lab",
+        "supervisors": [
+          "supervisor-wld01-a"
+        ],
+        "storage_policies": [
+          "vSAN Default Storage Policy",
+          "cluster-wld01-01a - Optimal Datastore Default Policy - AutoRAID"
+        ]
+      }
+
+    ],
+    "infrastructure_policies": [
+    {
+        "name": "linux",
+        "description": "Infrastructure Policy to place Linux workloads",
+        "vc_compute_policy_name": "linux-vm-host-affinity",
+        "is_mandatory": true
+    },
+    {
+        "name": "windows",
+        "description": "Infrastructure Policy to place Windows workloads",
+        "vc_compute_policy_name": "windows-vm-host-affinity",
+        "is_mandatory": true
+    }
+    ],
+    "provider_content_libraries": [
+      {
+        "name": "provider",
+        "description": "Provider Content Library",
+        "auto_attach": false,
+        "isSubscribed": true,
+        "storage_classes": [
+          {
+            "region": "us-east-a",
+            "name": "vsan-default-storage-policy"
+          }
+        ],
+        "subscription": 
+        {
+          "url": "https://vc-wld01-a.site-a.vcf.lab:443/cls/vcsp/lib/bb0855e2-50f2-4692-b95f-bc1af11040ac/lib.json",
+          "authenticated": false,
+          "password": null,
+          "need_local_copy": true
+        },
+        "items":[]
+      },
+      {
+        "name": "hol-provider",
+        "description": "HOL Provider Content Library",
+        "auto_attach": false,
+        "is_subscribed": false,
+        "storage_classes": [
+          {
+            "region": "us-east-a",
+            "name": "vsan-default-storage-policy"
+          }
+        ],
+        "subscription": {},
+        "items":[
+          {
+            "name": "photon-5-minimal-iso",
+            "description": "",
+            "item_type": "ISO",
+            "file": "/home/holuser/Downloads/photon-minimal-5.0-dde71ec57.x86_64.iso"             
+          }
+        ]
+      }
+    ],
+    "tenants": [
+      {
+        "name": "medtech",
+        "display_name": "MedTech",
+        "description": "MedTech Tenant",
+        "isClassicTenant": false,
+        "isProviderConsumptionOrg": false,
+        "enabled": true,
+
+        "regional_quota": 
+        {
+          "region": "us-east-a",
+          "share_all": false,
+          "all_supervisors": true,
+          "supervisors" : [],
+          "capacity": 
+          {
+            "all_zones": false,
+            "zones": [
+              {
+                "zone": "z-wld-a",
+                "cpu_limit_GHz": 10,
+                "memory_limit_GB": 10,
+                "cpu_reservation_GHz": 1,
+                "memory_reservation_GB": 1
+              }
+            ]
+          }
+        },
+        "resources":
+        {
+          "vm_classes": {
+            "all_classes": true,
+            "classes": []
+          },
+          "storage_classes": {
+            "all_classes": true,
+            "classes": []
+          },
+          "infra_policies": {
+            "all_policies": true,
+            "policies": []
+          }
+        },
+        "external_connection": {
+          "distributed": true,
+          "name": "distributed-vlan-connection-wld-a",
+          "cluster": "vna-cluster-wld01-a"
+        },
+        "first_user":
+        {
+          "username": "admin",
+          "password_file": "/home/holuser/Desktop/PASSWORD.txt",
+          "provider_type": "LOCAL",
+          "enabled": true,
+          "role": "Organization Administrator"
+        }
+      }
+    ]
+  }
+}
