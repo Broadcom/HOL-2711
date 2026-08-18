@@ -1,16 +1,16 @@
 apiVersion: v1
 kind: Secret
 metadata:
-  name: m9-cli-vm-bootstrap
+  name: m11-cli-vm-bootstrap
 stringData:
   password: '<SHA512_PASSWORD_HASH>'
 ---
 apiVersion: vmoperator.vmware.com/v1alpha3
 kind: VirtualMachine
 metadata:
-  name: m9-cli-vm
+  name: m11-cli-vm
   labels:
-    vm-lb: m9-cli-vm
+    vm-lb: m11-cli-vm
 spec:
   className: best-effort-small
   imageName: ubuntu-24-04-gold-ovf
@@ -25,17 +25,17 @@ spec:
             sudo: ALL=(ALL) NOPASSWD:ALL
             lock_passwd: false
             hashed_passwd:
-              name: m9-cli-vm-bootstrap
+              name: m11-cli-vm-bootstrap
               key: password
 ---
 apiVersion: vmoperator.vmware.com/v1alpha3
 kind: VirtualMachineService
 metadata:
-  name: m9-cli-vm-lb
+  name: m11-cli-vm-lb
 spec:
   type: LoadBalancer
   selector:
-    vm-lb: m9-cli-vm
+    vm-lb: m11-cli-vm
   ports:
     - name: ssh
       protocol: TCP

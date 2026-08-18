@@ -1,8 +1,8 @@
 apiVersion: infrastructure.cci.vmware.com/v1alpha2
 kind: SupervisorNamespace
 metadata:
-  generateName: ns-m9-demo-
-  namespace: m9-demo-project
+  generateName: ns-m11-demo-
+  namespace: m11-demo-project
 spec:
   className: small
   regionName: us-east-a

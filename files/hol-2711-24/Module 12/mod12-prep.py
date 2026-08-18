@@ -10,16 +10,13 @@ every action checks current state first and is safe to run twice.
 Actions (repair-class only; teaching steps stay in the manual):
   1. Argo CD trusts the lab root CA for gitlab.vcf.lab (API, no ssh).
   2. apps repo: readiness probe timeoutSeconds 10 ([skip ci] commit).
-  3. infra repo: uncomment the seed-db-credentials job ONLY
-     ([skip ci] commit; register-with-argocd stays commented).
+  3. infra repo: converge the live pipeline file to the labfiles
+     copy ([skip ci] commit).
   4. CI variables TF_VAR_vcfa_user / TF_VAR_vcfa_password point at
      the workshop persona.
   5. terraform.tfvars vcfa_user = scitech.gitops (password
      placeholder is left for the student, by design).
   6. Remove the stale supervisor control plane host key.
-  7. Provision the Argo registrar service account and CI variable so
-     the pipeline's register-with-argocd job can write the cluster
-     secret into ns-argocd.
 """
 
 import argparse
@@ -238,45 +235,74 @@ PROBE_NEW = """          readinessProbe:
 
 LABROOT = f"{HOME}/Documents/files/hol-2711-24/GitLab"
 
+# Superseded env-var attempt, still stripped if a repo carries it: the
+# pod's Harbor WordPress image (4.8.3) predates the official image's
+# WORDPRESS_CONFIG_EXTRA support, so the variable is inert there.
+WP_EXTRA = """\
+            # WordPress writes the URL it was installed at into its database
+            # (siteurl and home) and serves every stylesheet, script and image
+            # from that address, so a rebuilt load balancer that comes up on a
+            # new IP leaves the site unstyled. These defines make the URL
+            # follow whatever host the browser used, overriding the stored
+            # rows. Also covers the localhost case.
+            - name: WORDPRESS_CONFIG_EXTRA
+              value: >-
+                define('WP_HOME','http://'.$_SERVER['HTTP_HOST']);
+                define('WP_SITEURL','http://'.$_SERVER['HTTP_HOST']);
+"""
+
+WP_HOOK_ANCHOR = "          readinessProbe:\n"
+WP_HOOK = """\
+          # The pod's Harbor WordPress image (4.8.3) predates the official
+          # image's WORDPRESS_CONFIG_EXTRA support, so the URL fix is
+          # written into wp-config.php directly, once the entrypoint has
+          # generated it. WP_HOME/WP_SITEURL from the request host make
+          # the site serve correctly at any load balancer address,
+          # including after a destroy and rebuild, and cover the
+          # localhost case.
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - bash
+                  - -c
+                  - |
+                    f=/var/www/html/wp-config.php
+                    for i in $(seq 1 120); do
+                      [ -s "$f" ] && break
+                      sleep 1
+                    done
+                    sleep 1
+                    grep -q "WP_SITEURL" "$f" 2>/dev/null && exit 0
+                    sed -i "s|^<?php|<?php\\ndefine('WP_HOME','http://'.\\$_SERVER['HTTP_HOST']);\\ndefine('WP_SITEURL','http://'.\\$_SERVER['HTTP_HOST']);|" "$f"
+                    exit 0
+"""
+
+
 def transform_probe(text):
-    if "timeoutSeconds" in text:
-        return text
-    if PROBE_OLD not in text:
-        return None
-    return text.replace(PROBE_OLD, PROBE_NEW)
+    if "timeoutSeconds" not in text:
+        if PROBE_OLD not in text:
+            return None
+        text = text.replace(PROBE_OLD, PROBE_NEW)
+    if WP_EXTRA in text:
+        text = text.replace(WP_EXTRA, "")
+    if "postStart" not in text:
+        if WP_HOOK_ANCHOR not in text:
+            return None
+        text = text.replace(WP_HOOK_ANCHOR, WP_HOOK + WP_HOOK_ANCHOR, 1)
+    return text
 
 
 def transform_ci(text):
-    lines = text.splitlines(keepends=True)
-    if not any(l.startswith("seed-db-credentials:") for l in lines):
-        try:
-            start = next(i for i, l in enumerate(lines)
-                         if l.rstrip("\n") == "# seed-db-credentials:")
-        except StopIteration:
-            return None
-        end = start
-        while end < len(lines):
-            s = lines[end].rstrip("\n")
-            if ("ENDS HERE" in s or s.startswith("# register-with-argocd")
-                    or s == "" or not s.startswith("#")):
-                break
-            end += 1
-        lines[start:end] = [
-            (l[2:] if l.startswith("# ") else
-             ("\n" if l.rstrip("\n") == "#" else l))
-            for l in lines[start:end]]
-    text = "".join(lines)
-    old_inv = ('#     - python3 argocd_register_cluster.py --cluster '
-               '"$CLUSTER" --namespace "$SUPERVISOR_NS" --name "$CLUSTER"')
-    if old_inv + "\n" in text + "\n" and "--argocd-namespace" not in text:
-        text = text.replace(old_inv, old_inv + " --argocd-namespace ns-argocd")
+    # The labfiles copy ships with seed-db-credentials active and no
+    # commented Module 3 block, so it IS the desired state verbatim.
     return text
 
 
 SYNC_FILES = [
     ("probe", "hol-scitech-gitops/apps", "apps/hol-wordpress/manifest.yaml",
      f"{LABROOT}/apps/apps/hol-wordpress/manifest.yaml", transform_probe,
-     "hol-wordpress: readiness probe timeoutSeconds 10 [skip ci]"),
+     "hol-wordpress: probe timeout + URL defines via postStart [skip ci]"),
     ("seed-job", "hol-scitech-gitops/infra", ".gitlab-ci.yml",
      f"{LABROOT}/infra/.gitlab-ci.yml", transform_ci,
      "activate seed-db-credentials [skip ci]"),
@@ -316,6 +342,16 @@ def ci_vars(check):
         code, cur = http("GET",
                          f"{GITLAB}/api/v4/projects/{proj}/variables/{key}",
                          gl_hdr())
+        if code == 404:
+            if check:
+                report(f"ci-var {key}", "WOULD-FIX", "create missing variable")
+                continue
+            code, resp = http("POST",
+                              f"{GITLAB}/api/v4/projects/{proj}/variables",
+                              gl_hdr(), {"key": key, "value": val})
+            report(f"ci-var {key}", "FIXED" if code in (200, 201) else "FAILED",
+                   "created" if code in (200, 201) else f"POST {code}")
+            continue
         if code != 200:
             report(f"ci-var {key}", "FAILED", f"GET {code}")
             continue
@@ -335,13 +371,17 @@ def ci_vars(check):
 # --- 5. tfvars persona -----------------------------------------------------
 
 def tfvars_fix(check):
-    for d in ("Module 12", "ELW"):
-        p = f"{HOME}/Documents/files/hol-2711-24/{d}/terraform.tfvars"
-        if os.path.exists(p):
-            break
-    else:
+    found = [f"{HOME}/Documents/files/hol-2711-24/{d}/terraform.tfvars"
+             for d in ("Module 12", "ELW")
+             if os.path.exists(f"{HOME}/Documents/files/hol-2711-24/{d}/terraform.tfvars")]
+    if not found:
         report("tfvars", "FAILED", "terraform.tfvars not found")
         return
+    for p in found:
+        _tfvars_one(p, check)
+
+
+def _tfvars_one(p, check):
     try:
         cur = open(p).read()
     except Exception as exc:
@@ -385,155 +425,21 @@ def hostkey_fix(check):
 
 
 
-# --- 7. Argo registrar credential for the pipeline -------------------------
-#
-# The register-with-argocd job reads the CAPI kubeconfig from the tenant
-# namespace (its VCF Automation session can) and then writes a labelled
-# cluster Secret into ns-argocd (its session cannot). This provisions a
-# service account scoped to exactly that write, and stores its token as a
-# masked CI variable the job consumes. Supervisor-side work, so it uses
-# the decryptK8Pwd route: the only step in this script that needs ssh.
-
-ARGO_NS = "ns-argocd"
-SA = "argocd-registrar"
-VC = "vc-wld01-a.site-a.vcf.lab"
-SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "ConnectTimeout=15", "-o", "BatchMode=no"]
-
-RBAC = f"""apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: {SA}
-  namespace: {ARGO_NS}
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: {SA}
-  namespace: {ARGO_NS}
-rules:
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get", "create", "update", "patch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: {SA}
-  namespace: {ARGO_NS}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: {SA}
-subjects:
-  - kind: ServiceAccount
-    name: {SA}
-    namespace: {ARGO_NS}
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: {SA}-token
-  namespace: {ARGO_NS}
-  annotations:
-    kubernetes.io/service-account.name: {SA}
-type: kubernetes.io/service-account-token
-"""
-
-
-def _ssh(host, password, command):
-    """Returns (rc, stdout, stderr); never raises. rc 127 means the ssh
-    tooling itself is unavailable, 124 means it timed out."""
-    r, w = os.pipe()
-    os.write(w, (password + "\n").encode())
-    os.close(w)
-    try:
-        p = subprocess.run(["sshpass", f"-d{r}", "ssh"] + SSH_OPTS +
-                           [f"root@{host}", command],
-                           capture_output=True, text=True, pass_fds=(r,),
-                           timeout=120)
-        return p.returncode, p.stdout, p.stderr
-    except subprocess.TimeoutExpired:
-        return 124, "", f"timed out contacting {host}"
-    except FileNotFoundError as exc:
-        return 127, "", f"ssh tooling missing: {exc}"
-    except Exception as exc:  # noqa: BLE001
-        return 1, "", str(exc)[:160]
-    finally:
-        try:
-            os.close(r)
-        except OSError:
-            pass
-
-
-def registrar_cred(check):
-    proj = urllib.parse.quote("hol-scitech-gitops/infra", safe="")
-    var = "ARGOCD_REGISTRAR_TOKEN"
-    code, cur = http("GET",
-                     f"{GITLAB}/api/v4/projects/{proj}/variables/{var}",
-                     gl_hdr())
-    if (code == 200 and isinstance(cur, dict)
-            and (cur.get("value") or "").strip()):
-        report("registrar", "OK", "CI variable already present")
-        return
-    if check:
-        report("registrar", "WOULD-FIX",
-               f"create {SA} in {ARGO_NS} and store {var}")
-        return
-    pw = read_secret(PW_FILE)
-    if not pw:
-        report("registrar", "FAILED", f"cannot read {PW_FILE}")
-        return
-    rc, out, err = _ssh(VC, pw, "/usr/lib/vmware-wcp/decryptK8Pwd.py")
-    cp_ip, cp_pw = "", ""
-    for line in out.splitlines():
-        if line.startswith("IP:"):
-            cp_ip = line.split()[1]
-        elif line.startswith("PWD:"):
-            cp_pw = line.split(None, 1)[1].strip()
-    if not (cp_ip and cp_pw):
-        report("registrar", "FAILED",
-               f"decryptK8Pwd gave nothing: {(err or out).strip()[:120]}")
-        return
-    kc = "KUBECONFIG=/etc/kubernetes/admin.conf"
-    b64 = base64.b64encode(RBAC.encode()).decode()
-    rc, out, err = _ssh(cp_ip, cp_pw,
-                        f"echo {b64} | base64 -d | {kc} kubectl apply -f -")
-    if rc != 0:
-        report("registrar", "FAILED", f"rbac apply: {err.strip()[:140]}")
-        return
-    rc, out, err = _ssh(cp_ip, cp_pw,
-                        f"{kc} kubectl -n {ARGO_NS} get secret {SA}-token "
-                        "-o jsonpath='{.data.token}'")
-    try:
-        token = base64.b64decode(out.strip()).decode() if out.strip() else ""
-    except Exception:
-        token = ""
-    if not token:
-        report("registrar", "FAILED", "token secret empty")
-        return
-    body = {"key": var, "value": token, "masked": True, "protected": False}
-    code, resp = http("POST", f"{GITLAB}/api/v4/projects/{proj}/variables",
-                      gl_hdr(), body)
-    if code not in (200, 201):
-        code, resp = http("PUT",
-                          f"{GITLAB}/api/v4/projects/{proj}/variables/{var}",
-                          gl_hdr(), {"value": token, "masked": True})
-    report("registrar", "FIXED" if code in (200, 201) else "FAILED",
-           f"{SA} in {ARGO_NS}, {var} set" if code in (200, 201)
-           else f"variable {code}: {resp}")
-
-
 def preflight():
     """Report what this pod is missing before anything is attempted. Never
     fatal on its own: each action still reports its own outcome."""
-    missing = [p for p in (PW_FILE, PAT_FILE) if not read_secret(p)]
+    gitops_pat = f"{HOME}/Desktop/API Tokens/PAT-SciTech.Gitops-Gitlab.txt"
+    missing = [p for p in (PW_FILE, PAT_FILE, gitops_pat) if not read_secret(p)]
     for p in missing:
         report("preflight", "FAILED", f"credential file unreadable: {p}")
-    tools = [t for t in ("kubectl", "ssh-keygen", "sshpass")
+    tools = [t for t in ("kubectl", "ssh-keygen")
              if subprocess.run(["which", t], capture_output=True).returncode]
     if tools:
         report("preflight", "FAILED", f"tools missing: {', '.join(tools)}")
+    if subprocess.run([sys.executable, "-c", "import yaml"],
+                      capture_output=True).returncode:
+        report("preflight", "FAILED",
+               "PyYAML missing: argocd_register_cluster.py needs it")
 
 
 def guarded(fn, name, check):
@@ -556,19 +462,17 @@ def main():
     preflight()
     for fn, name in ((argo_cert, "argo-cert"), (gitlab_sync, "gitlab-sync"),
                      (ci_vars, "ci-vars"), (tfvars_fix, "tfvars"),
-                     (hostkey_fix, "host-key"),
-                     (registrar_cred, "registrar")):
+                     (hostkey_fix, "host-key")):
         guarded(fn, name, args.check)
     bad = [r for r in RESULTS if r[1] == "FAILED"]
-    print(f"done: {len(RESULTS)} items, {len(bad)} failed")
     if bad:
-        print("NOT READY. Fix these, then run again (the script is safe to "
-              "re-run and will skip what is already correct):")
         for item, _, detail in bad:
             print(f"  - {item}: {detail}")
+        print()
+        print("NOT READY: Please ask for help.")
     else:
-        print("READY. The student still replaces the password placeholder "
-              "in terraform.tfvars; everything else is in place.")
+        print()
+        print("READY")
     sys.exit(1 if bad else 0)
 
 
