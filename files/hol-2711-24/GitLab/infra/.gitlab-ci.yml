@@ -50,10 +50,9 @@ variables:
       -backend-config="unlock_method=DELETE" \
       -backend-config="retry_wait_min=5"
 
-# All five stages are declared even though two have no jobs yet. A stage with
-# no jobs is simply skipped, and declaring them up front means Module 3 is one
-# edit (uncomment the jobs) rather than two (uncomment the jobs AND remember to
-# add the stages).
+# All five stages are declared even though the register stage has no jobs:
+# the cluster is registered with Argo CD from the Main Console instead. A
+# stage with no jobs is simply skipped.
 stages: [plan, apply, register, seed, destroy]
 
 # Every job that touches terraform state shares one resource_group so GitLab
@@ -86,40 +85,15 @@ apply:
     paths: [tf-outputs.json]
     expire_in: 1 day
 
-# ===========================================================================
-# MODULE 3 STARTS HERE
+# Hands the database credential to the cluster that was just built. The
+# database lives on its own VM, in its own Terraform state, so it outlives
+# every cluster built here.
 #
-# Right now this pipeline builds a cluster and stops. Argo CD has no idea the
-# cluster exists, so nothing gets deployed onto it.
+# Runs on EVERY pipeline, not just the first: a rebuilt cluster is empty and
+# has no idea how to reach the database until this puts the credential back.
 #
-# To finish the chain, delete the leading "# " from every line between this
-# marker and the END marker below, then commit. Both stages are already
-# declared above, so nothing else needs changing.
-# ===========================================================================
-
-# # The handoff with no built-in equivalent: VCF Automation just built a
-# # cluster and Argo CD has no idea it exists. The admin kubeconfig is already
-# # published as the CAPI <cluster>-kubeconfig secret, so this reads it and
-# # writes the corresponding Argo cluster secret. kubectl uses the throwaway
-# # kubeconfig minted by .kube_login above: the runner itself has no identity.
-# register-with-argocd:
-#   stage: register
-#   tags: [vcf]
-#   script:
-#     - *kube_login
-#     - CLUSTER=$(jq -r '.cluster_name.value' tf-outputs.json)
-#     - echo "registering $CLUSTER with Argo CD"
-#     - python3 argocd_register_cluster.py --cluster "$CLUSTER" --namespace "$SUPERVISOR_NS" --name "$CLUSTER" --argocd-namespace ns-argocd
-#
-# # Hands the database credential to the cluster that was just built. The
-# # database was created in Module 1 and lives on its own VM, in its own
-# # Terraform state, so it outlives every cluster built here.
-# #
-# # Runs on EVERY pipeline, not just the first: a rebuilt cluster is empty and
-# # has no idea how to reach the database until this puts the credential back.
-# #
-# # This is also what keeps the password out of git. demo/hol-apps refers to
-# # the Secret by name; only the platform and this pipeline see its value.
+# This is also what keeps the password out of git. The apps repo refers to
+# the Secret by name; only the platform and this pipeline see its value.
 seed-db-credentials:
   stage: seed
   tags: [vcf]
@@ -128,17 +102,14 @@ seed-db-credentials:
     - CLUSTER=$(jq -r '.cluster_name.value' tf-outputs.json)
     - bash seed_db_credentials.sh "$CLUSTER" "$SUPERVISOR_NS" hol-wordpress
 
-# ===========================================================================
-# MODULE 3 ENDS HERE
-# ===========================================================================
-
 # The teardown act. MANUAL on purpose: this destroys the Kubernetes cluster and
-# every workload in it. It does NOT touch demo/hol-data, which holds the
+# every workload in it. It does NOT touch the database VM's own Terraform state, which holds the
 # database on its own VM in its own state file, so the site's content survives.
 #
-# Re-running the pipeline afterwards rebuilds the cluster, re-registers it with
-# Argo CD, re-seeds the credential, and Argo puts WordPress back. The site
-# returns with its posts intact.
+# Re-running the pipeline afterwards rebuilds the cluster and re-seeds the
+# credential; the rebuilt cluster is registered with Argo CD from the Main
+# Console, and Argo puts WordPress back. The site returns with its posts
+# intact.
 destroy-cluster:
   stage: destroy
   tags: [vcf]

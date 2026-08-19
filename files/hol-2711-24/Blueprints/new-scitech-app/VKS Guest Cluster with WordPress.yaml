@@ -242,14 +242,32 @@ resources:
                                   - {name: WORDPRESS_DB_NAME, value: wordpress}
                                   - {name: WORDPRESS_DB_USER, value: wordpress}
                                   - {name: WORDPRESS_DB_PASSWORD, value: "${resource.dbPassword.generatedPassword}"}
-                                  # The install Job pins --url=http://localhost (the LB
-                                  # address is unknowable at install time), which leaves
-                                  # the site unstyled at its real address. Deriving the
-                                  # URL from the request host fixes it at any address.
-                                  - {name: WORDPRESS_CONFIG_EXTRA, value: "define('WP_HOME','http://'.$_SERVER['HTTP_HOST']); define('WP_SITEURL','http://'.$_SERVER['HTTP_HOST']);"}
                                 ports: [{containerPort: 80}]
                                 volumeMounts:
                                   - {name: wpcli, mountPath: /wpcli}
+                                # The pod's Harbor WordPress image (4.8.3) predates the official
+                                # image's WORDPRESS_CONFIG_EXTRA support, so the URL fix is
+                                # written into wp-config.php directly, once the entrypoint has
+                                # generated it. WP_HOME/WP_SITEURL from the request host make
+                                # the site serve correctly at any load balancer address,
+                                # including after a destroy and rebuild, and cover the
+                                # localhost case.
+                                lifecycle:
+                                  postStart:
+                                    exec:
+                                      command:
+                                        - bash
+                                        - -c
+                                        - |
+                                          f=/var/www/html/wp-config.php
+                                          for i in $(seq 1 120); do
+                                            [ -s "$f" ] && break
+                                            sleep 1
+                                          done
+                                          sleep 1
+                                          grep -q "WP_SITEURL" "$f" 2>/dev/null && exit 0
+                                          sed -i "s|^<?php|<?php\ndefine('WP_HOME','http://'.\$_SERVER['HTTP_HOST']);\ndefine('WP_SITEURL','http://'.\$_SERVER['HTTP_HOST']);|" "$f"
+                                          exit 0
                             volumes:
                               - {name: wpcli, emptyDir: {}}
                       ---
