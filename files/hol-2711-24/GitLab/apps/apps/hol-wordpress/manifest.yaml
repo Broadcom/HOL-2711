@@ -55,13 +55,33 @@ spec:
           envFrom:
             - secretRef: {name: hol-wp-salts}
               prefix: WORDPRESS_
+          # The pod's Harbor WordPress image (4.8.3) predates the official
+          # image's WORDPRESS_CONFIG_EXTRA support, so the URL fix is
+          # written into wp-config.php directly, once the entrypoint has
+          # generated it. WP_HOME/WP_SITEURL from the request host make
+          # the site serve correctly at any load balancer address,
+          # including after a destroy and rebuild, and cover the
+          # localhost case.
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - bash
+                  - -c
+                  - |
+                    f=/var/www/html/wp-config.php
+                    for i in $(seq 1 120); do
+                      [ -s "$f" ] && break
+                      sleep 1
+                    done
+                    sleep 1
+                    grep -q "WP_SITEURL" "$f" 2>/dev/null && exit 0
+                    sed -i "s|^<?php|<?php\ndefine('WP_HOME','http://'.\$_SERVER['HTTP_HOST']);\ndefine('WP_SITEURL','http://'.\$_SERVER['HTTP_HOST']);|" "$f"
+                    exit 0
           readinessProbe:
             httpGet: {path: /, port: 80}
             initialDelaySeconds: 10
             periodSeconds: 5
-            # Before installation, / renders the installer in ~6 s;
-            # the 1 s default timeout never passes and the LB never
-            # gets an endpoint.
             timeoutSeconds: 10
           resources:
             requests: {cpu: 100m, memory: 256Mi}
