@@ -304,8 +304,8 @@
               "zones": [
                 {
                   "zone": "z-wld-a",
-                  "cpu_limit_GHz": 20,
-                  "memory_limit_GB": 20,
+                  "cpu_limit_GHz": 30,
+                  "memory_limit_GB": 30,
                   "cpu_reservation_GHz": 1,
                   "memory_reservation_GB": 1
                 }
@@ -338,12 +338,7 @@
                 {
                   "region": "us-east-a",
                   "name": "vSAN Default Storage Policy",
-                  "storage_limit_mib": 10240                     
-                },
-                {
-                  "region": "us-east-a",
-                  "name": "cluster-wld01-01a - Optimal Datastore Default Policy - AutoRAID",
-                  "storage_limit_mib": 102400
+                  "storage_limit_mib": 500000                   
                 }
               ],
               "infra_policies": {
