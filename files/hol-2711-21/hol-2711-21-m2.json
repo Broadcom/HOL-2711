@@ -124,18 +124,48 @@
         }
       },
       "infrastructure_policies": [
-      {
+        {
           "name": "linux",
           "description": "Infrastructure Policy to place Linux workloads",
           "vc_compute_policy_name": "linux-vm-host-affinity",
-          "is_mandatory": true
-      },
-      {
+          "is_mandatory": true,
+          "policy_rule":
+          {
+            "operator": "AND",
+            "rules": [
+              {
+                "workload_policy_rule": {
+                  "guestos_family_rule":
+                  {
+                    "operator": "IS_EQUAL",
+                    "value": "LINUX"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
           "name": "windows",
           "description": "Infrastructure Policy to place Windows workloads",
           "vc_compute_policy_name": "windows-vm-host-affinity",
-          "is_mandatory": true
-      }
+          "is_mandatory": true,
+                    "policy_rule":
+          {
+            "operator": "AND",
+            "rules": [
+              {
+                "workload_policy_rule": {
+                  "guestos_family_rule":
+                  {
+                    "operator": "IS_EQUAL",
+                    "value": "WINDOWS"
+                  }
+                }
+              }
+            ]
+          }
+        }
       ],
       "provider_content_libraries": {
         "provider": {
@@ -305,7 +335,7 @@
                 {
                   "zone": "z-wld-a",
                   "cpu_limit_GHz": 30,
-                  "memory_limit_GB": 30,
+                  "memory_limit_GB": 50,
                   "cpu_reservation_GHz": 1,
                   "memory_reservation_GB": 1
                 }

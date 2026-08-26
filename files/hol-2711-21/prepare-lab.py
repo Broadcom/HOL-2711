@@ -1109,19 +1109,186 @@ def vcfa_infra_policies(client: RestClient):
     return client.paged("/cloudapi/v1/infraPolicies")
 
 
-def create_infra_policy_if_missing(client: RestClient, cfg: Dict[str, Any]):
-    for p in vcfa_infra_policies(client):
-        if p.get("name") == cfg["name"]:
-            skip(f"VCFA infrastructure policy '{cfg['name']}' already exists")
-            return p
-    body = {
-        "name": cfg["name"],
-        "description": cfg.get("description", ""),
+def normalize_infra_policy_rule(value: Any) -> Any:
+    """
+    Convert the JSON-friendly infrastructure policy rule schema to the VCFA
+    Provider Infrastructure API schema.
+
+    Supported JSON keys include:
+      workload_policy_rule -> workloadPolicyRule
+      guestos_family_rule  -> guestOsFamilyRule
+      guest_os_family_rule -> guestOsFamilyRule
+      guestos_rule         -> guestOsRule
+      guest_os_rule        -> guestOsRule
+      label_selector_rules -> labelSelectorRules
+      rule_key             -> ruleKey
+
+    Unknown keys are preserved so newer PolicyRule fields can pass through.
+    """
+    if isinstance(value, list):
+        return [normalize_infra_policy_rule(item) for item in value]
+
+    if not isinstance(value, dict):
+        return value
+
+    key_map = {
+        "workload_policy_rule": "workloadPolicyRule",
+        "guestos_family_rule": "guestOsFamilyRule",
+        "guest_os_family_rule": "guestOsFamilyRule",
+        "guestos_rule": "guestOsRule",
+        "guest_os_rule": "guestOsRule",
+        "label_selector_rules": "labelSelectorRules",
+        "rule_key": "ruleKey",
+    }
+
+    result: Dict[str, Any] = {}
+
+    for key, item in value.items():
+        api_key = key_map.get(key, key)
+        result[api_key] = normalize_infra_policy_rule(item)
+
+    return result
+
+
+def infra_policy_body(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    body: Dict[str, Any] = {
+        "name": str(cfg.get("name", "") or "").strip(),
+        "description": str(cfg.get("description", "") or ""),
         "vcComputePolicyName": cfg.get("vc_compute_policy_name"),
         "isMandatory": bool(cfg.get("is_mandatory", False)),
     }
-    create(f"VCFA infrastructure policy '{cfg['name']}'")
-    return client.post("/cloudapi/v1/infraPolicies", json=body)
+
+    policy_rule = cfg.get("policy_rule")
+    if policy_rule is not None:
+        if not isinstance(policy_rule, dict):
+            raise RuntimeError(
+                f"Infrastructure policy '{body['name']}'.policy_rule "
+                "must be an object"
+            )
+
+        body["policyRule"] = normalize_infra_policy_rule(policy_rule)
+
+    return body
+
+
+def infra_policy_managed_view(policy: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Return only fields managed by this JSON configuration so server-generated
+    properties such as id, creationStatus, creationTime and sync state do not
+    trigger false updates.
+    """
+    result: Dict[str, Any] = {
+        "name": str(policy.get("name", "") or "").strip(),
+        "description": str(policy.get("description", "") or ""),
+        "vcComputePolicyName": policy.get("vcComputePolicyName"),
+        "isMandatory": bool(policy.get("isMandatory", False)),
+    }
+
+    if "policyRule" in policy and policy.get("policyRule") is not None:
+        result["policyRule"] = policy.get("policyRule")
+
+    return result
+
+
+def _canonical_policy_value(value: Any) -> Any:
+    """
+    Canonicalize JSON-like structures for stable comparison while preserving
+    ordered rule arrays.
+    """
+    if isinstance(value, dict):
+        return {
+            key: _canonical_policy_value(value[key])
+            for key in sorted(value)
+        }
+
+    if isinstance(value, list):
+        return [_canonical_policy_value(item) for item in value]
+
+    return value
+
+def create_infra_policy_if_missing(
+    client: RestClient,
+    cfg: Dict[str, Any],
+):
+    name = str(cfg.get("name", "") or "").strip()
+    if not name:
+        raise RuntimeError(
+            "Each vcfa.provider.infrastructure_policies entry requires 'name'"
+        )
+
+    desired = infra_policy_body(cfg)
+    existing = None
+
+    for policy in vcfa_infra_policies(client):
+        if str(policy.get("name", "") or "").strip().casefold() == name.casefold():
+            existing = policy
+            break
+
+    if existing is None:
+        info(
+            f"VCFA infrastructure policy create payload for '{name}':\n"
+            f"{json.dumps(desired, indent=2)}"
+        )
+        create(f"VCFA infrastructure policy '{name}'")
+        return client.post(
+            "/cloudapi/v1/infraPolicies",
+            json=desired,
+        )
+
+    current = infra_policy_managed_view(existing)
+
+    # If policy_rule is omitted from JSON, leave an existing policyRule
+    # unmanaged rather than deleting it. If policy_rule is explicitly present,
+    # it becomes authoritative.
+    if "policy_rule" not in cfg:
+        current.pop("policyRule", None)
+        desired.pop("policyRule", None)
+
+    if _canonical_policy_value(current) == _canonical_policy_value(desired):
+        skip(
+            f"VCFA infrastructure policy '{name}' already matches configuration"
+        )
+        return existing
+
+    changed_fields = []
+    for field in ("description", "vcComputePolicyName", "isMandatory", "policyRule"):
+        if _canonical_policy_value(current.get(field)) != _canonical_policy_value(
+            desired.get(field)
+        ):
+            changed_fields.append(field)
+
+    policy_id = str(existing.get("id", "") or "").strip()
+    if not policy_id:
+        raise RuntimeError(
+            f"VCFA infrastructure policy '{name}' differs from configuration "
+            "but its id/URN was not returned by the API"
+        )
+
+    update_body = dict(desired)
+    update_body["id"] = policy_id
+
+    info(
+        f"VCFA infrastructure policy '{name}' differs in: "
+        f"{', '.join(changed_fields)}"
+    )
+    info(
+        f"VCFA infrastructure policy update payload for '{name}':\n"
+        f"{json.dumps(update_body, indent=2)}"
+    )
+
+    update(f"VCFA infrastructure policy '{name}'")
+
+    encoded_id = urllib.parse.quote(policy_id, safe="")
+    updated = client.put(
+        f"/cloudapi/v1/infraPolicies/{encoded_id}",
+        json=update_body,
+    )
+
+    info(
+        f"VCFA infrastructure policy '{name}' updated"
+    )
+
+    return updated if isinstance(updated, dict) else existing
 
 
 # ============================================================
@@ -9070,6 +9237,62 @@ def _supervisor_namespace_payload(
 
         zone_payload.append(zone)
 
+    # Storage classes:
+    # - If the NamespaceClassConfig already defines storageClasses, inherit them.
+    # - Otherwise use namespaces[].storage_classes as namespace-level overrides.
+    class_spec = class_config.get("spec") or {}
+    if not isinstance(class_spec, dict):
+        class_spec = {}
+
+    class_storage_classes = class_spec.get("storageClasses") or []
+    if not isinstance(class_storage_classes, list):
+        class_storage_classes = []
+
+    namespace_storage_classes = namespace_cfg.get("storage_classes") or []
+    if not isinstance(namespace_storage_classes, list):
+        raise RuntimeError(
+            f"Namespace '{name or '<unnamed>'}'.storage_classes must be an array"
+        )
+
+    storage_override: List[Dict[str, Any]] = []
+
+    if not class_storage_classes:
+        seen_storage = set()
+
+        for storage_cfg in namespace_storage_classes:
+            if not isinstance(storage_cfg, dict):
+                raise RuntimeError(
+                    f"Namespace '{name or '<unnamed>'}' storage_classes entries "
+                    "must be objects"
+                )
+
+            storage_name = str(storage_cfg.get("name", "") or "").strip()
+            if not storage_name:
+                raise RuntimeError(
+                    f"Namespace '{name or '<unnamed>'}' contains a storage class "
+                    "without a name"
+                )
+
+            key = storage_name.casefold()
+            if key in seen_storage:
+                continue
+            seen_storage.add(key)
+
+            entry: Dict[str, Any] = {"name": storage_name}
+
+            limit = storage_cfg.get("limit")
+            if limit is not None and str(limit).strip():
+                entry["limit"] = str(limit).strip()
+
+            storage_override.append(entry)
+
+        if not storage_override:
+            raise RuntimeError(
+                f"Cannot create namespace '{name or '<unnamed>'}': "
+                f"SupervisorNamespaceClassConfig '{class_name}' has no "
+                "storageClasses and namespaces[].storage_classes is empty"
+            )
+
     spec: Dict[str, Any] = {
         "description": str(namespace_cfg.get("description", "") or ""),
         "regionName": region_name,
@@ -9078,6 +9301,9 @@ def _supervisor_namespace_payload(
             "zones": zone_payload,
         },
     }
+
+    if storage_override:
+        spec["initialClassConfigOverrides"]["storageClasses"] = storage_override
 
     vpc_name = str(namespace_cfg.get("vpcName", "") or "").strip()
     if vpc_name:
