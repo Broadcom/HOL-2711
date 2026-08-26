@@ -193,7 +193,7 @@
           "subscription": {},
           "items":[
             {
-              "name": "photon-5-minimal-iso",
+              "name": "photon-os-5-minimal-iso",
               "description": "",
               "item_type": "ISO",
               "files": [
