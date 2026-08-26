@@ -118,8 +118,7 @@
             "supervisor-wld01-a"
           ],
           "storage_policies": [
-            "vSAN Default Storage Policy",
-            "cluster-wld01-01a - Optimal Datastore Default Policy - AutoRAID"
+            "vSAN Default Storage Policy"
           ]
         }
       },
