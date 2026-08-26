@@ -637,28 +637,143 @@ def vc_compute_capability(vc: RestClient, policy_type: str):
     raise RuntimeError(f"No vCenter compute-policy capability found for '{policy_type}'")
 
 
-def vc_create_compute_policy_if_missing(vc: RestClient, cfg: Dict[str, Any]):
-    existing = vc_compute_policy(vc, cfg["name"])
+def vc_create_compute_policy_if_missing(
+    vc: RestClient,
+    cfg: Dict[str, Any],
+):
+    name = str(cfg.get("name", "") or "").strip()
+
+    if not name:
+        raise RuntimeError(
+            "Each vcenter.policies entry requires 'name'"
+        )
+
+    requirement = str(
+        cfg.get("requirement", "preferred") or "preferred"
+    ).strip().casefold()
+
+    requirement_to_strictness = {
+        "preferred": (
+            "PREFERRED_DURING_PLACEMENT_"
+            "PREFERRED_DURING_EXECUTION"
+        ),
+        "required": (
+            "REQUIRED_DURING_PLACEMENT_"
+            "PREFERRED_DURING_EXECUTION"
+        ),
+    }
+
+    if requirement not in requirement_to_strictness:
+        raise RuntimeError(
+            f"vCenter compute policy '{name}' has unsupported "
+            f"requirement '{requirement}'. Expected: preferred or required"
+        )
+
+    desired_strictness = requirement_to_strictness[requirement]
+
+    existing = vc_compute_policy(vc, name)
+
     if existing:
-        skip(f"Compute policy '{cfg['name']}' already exists")
+        policy_id = str(
+            existing.get("policy")
+            or existing.get("id")
+            or ""
+        ).strip()
+
+        if policy_id:
+            encoded_policy_id = urllib.parse.quote(
+                policy_id,
+                safe="",
+            )
+
+            try:
+                details = vc.get(
+                    f"/api/vcenter/compute/policies/{encoded_policy_id}",
+                    max_attempts=1,
+                )
+            except RuntimeError:
+                details = None
+
+            if isinstance(details, dict):
+                current_strictness = str(
+                    details.get("strictness", "") or ""
+                ).strip().upper()
+
+                if current_strictness:
+                    if current_strictness == desired_strictness:
+                        skip(
+                            f"Compute policy '{name}' already exists "
+                            f"with requirement '{requirement}'"
+                        )
+                        return existing
+
+                    raise RuntimeError(
+                        f"Compute policy '{name}' already exists with "
+                        f"strictness '{current_strictness}', but JSON "
+                        f"requires '{desired_strictness}'. vSphere 9.1 does "
+                        "not support changing strictness with PATCH; "
+                        "delete/recreate the compute policy to change its "
+                        "Policy Requirement."
+                    )
+
+        skip(
+            f"Compute policy '{name}' already exists; unable to confirm "
+            f"Policy Requirement from returned policy details"
+        )
         return existing
-    vm_tag = vc_get_tag(vc, cfg["vm_tag"]["category"], cfg["vm_tag"]["tag"])
-    host_tag = vc_get_tag(vc, cfg["host_tag"]["category"], cfg["host_tag"]["tag"])
+
+    vm_tag = vc_get_tag(
+        vc,
+        cfg["vm_tag"]["category"],
+        cfg["vm_tag"]["tag"],
+    )
+    host_tag = vc_get_tag(
+        vc,
+        cfg["host_tag"]["category"],
+        cfg["host_tag"]["tag"],
+    )
+
     if not vm_tag or not host_tag:
-        raise RuntimeError(f"Tags for compute policy '{cfg['name']}' not found")
-    cap = vc_compute_capability(vc, cfg["type"])
+        raise RuntimeError(
+            f"Tags for compute policy '{name}' not found"
+        )
+
+    cap = vc_compute_capability(
+        vc,
+        cfg["type"],
+    )
+
     vm_tag_id = vm_tag.get("tag") or vm_tag.get("id")
     host_tag_id = host_tag.get("tag") or host_tag.get("id")
+
     body = {
         "capability": cap.get("capability"),
-        "name": cfg["name"],
-        "description": cfg.get("description", ""),
+        "name": name,
+        "description": str(cfg.get("description", "") or ""),
         "vm_tag": vm_tag_id,
         "host_tag": host_tag_id,
+        "strictness": desired_strictness,
     }
-    create(f"Compute policy '{cfg['name']}'")
-    pid = vc.post("/api/vcenter/compute/policies", json=body)
-    return {"name": cfg["name"], "policy": pid}
+
+    info(
+        f"Compute policy create payload for '{name}':\n"
+        f"{json.dumps(body, indent=2)}"
+    )
+
+    create(
+        f"Compute policy '{name}' "
+        f"(requirement={requirement})"
+    )
+
+    pid = vc.post(
+        "/api/vcenter/compute/policies",
+        json=body,
+    )
+
+    return {
+        "name": name,
+        "policy": pid,
+    }
 
 
 def cis_value(payload):
@@ -690,15 +805,19 @@ def vc_vapi_object_type(config_type: str) -> str:
 def vc_dynamic_id(
     config_type: str,
     moid: str,
-    vcenter_instance_uuid: str,
+    vcenter_instance_uuid: str = "",
 ) -> Dict[str, str]:
-    object_type = vc_vapi_object_type(config_type)
-    qualified_id = moid
-    if vcenter_instance_uuid and ":" not in moid:
-        qualified_id = f"{moid}:{vcenter_instance_uuid}"
+    """
+    Build the DynamicID for normal vCenter inventory objects.
+
+    For VMHost and normal VirtualMachine objects the CIS tagging API expects
+    the raw managed-object ID (for example host-19 or vm-123). Do not append
+    the vCenter instance UUID. Supervisor/VM Service VMs are skipped before
+    reaching this code.
+    """
     return {
-        "type": object_type,
-        "id": qualified_id,
+        "type": vc_vapi_object_type(config_type),
+        "id": str(moid or "").strip(),
     }
 
 
@@ -1251,7 +1370,12 @@ def create_infra_policy_if_missing(
         return existing
 
     changed_fields = []
-    for field in ("description", "vcComputePolicyName", "isMandatory", "policyRule"):
+    for field in (
+        "description",
+        "vcComputePolicyName",
+        "isMandatory",
+        "policyRule",
+    ):
         if _canonical_policy_value(current.get(field)) != _canonical_policy_value(
             desired.get(field)
         ):
@@ -9815,20 +9939,123 @@ def main():
                 vc_create_tag_if_missing(vc_rest, cat_cfg["name"], tag_cfg)
 
         for assignment in tag_cfg_root.get("assignments", []):
-            entity = find_vcenter_object(vc_si, assignment["type"], assignment["name"])
-            moid = entity._moId
-            dynamic_type = assignment["type"]
+            assignment_type = str(
+                assignment.get("type", "") or ""
+            ).strip()
+
+            entity = find_vcenter_object(
+                vc_si,
+                assignment_type,
+                assignment["name"],
+            )
+
+            # Normal VirtualMachine objects can be tagged through the vCenter
+            # tagging API. Skip only Supervisor/VM Service managed VMs, which
+            # expose the vmware-system-vm-uuid annotation in extraConfig and
+            # must be managed through the Supervisor/VM Service path.
+            if assignment_type.casefold() == "virtualmachine":
+                is_supervisor_vm = False
+
+                try:
+                    for option in (entity.config.extraConfig or []):
+                        key = str(getattr(option, "key", "") or "").casefold()
+                        if key == "vmware-system-vm-uuid":
+                            is_supervisor_vm = True
+                            break
+                except Exception:
+                    pass
+
+                if is_supervisor_vm:
+                    skip(
+                        f"'{assignment.get('name', '')}' is a Supervisor-based "
+                        "VM; vCenter tag assignment is intentionally skipped"
+                    )
+                    continue
+            moid = str(entity._moId)
+            dynamic_type = assignment_type
+
+            info(
+                f"Resolved vCenter tagging target "
+                f"'{assignment['name']}' -> "
+                f"{vc_vapi_object_type(dynamic_type)}:{moid}"
+            )
+
             for tag_cfg in assignment.get("tags", []):
-                tag = vc_get_tag(vc_rest, tag_cfg["category"], tag_cfg["tag"])
+                tag = vc_get_tag(
+                    vc_rest,
+                    tag_cfg["category"],
+                    tag_cfg["tag"],
+                )
+
                 if not tag:
-                    raise RuntimeError(f"Tag '{tag_cfg['category']}/{tag_cfg['tag']}' does not exist")
+                    raise RuntimeError(
+                        f"Tag '{tag_cfg['category']}/{tag_cfg['tag']}' "
+                        "does not exist"
+                    )
+
                 tag_id = tag.get("tag") or tag.get("id")
-                attached = vc_list_attached_tags(vc_rest, dynamic_type, moid, vc_instance_uuid)
+
+                attached = vc_list_attached_tags(
+                    vc_rest,
+                    dynamic_type,
+                    moid,
+                    vc_instance_uuid,
+                )
+
                 if tag_id in attached:
-                    skip(f"'{assignment['name']}' already has '{tag_cfg['category']}/{tag_cfg['tag']}'")
-                else:
-                    create(f"Assign '{tag_cfg['category']}/{tag_cfg['tag']}' to '{assignment['name']}'")
-                    vc_attach_tag(vc_rest, tag_id, dynamic_type, moid, vc_instance_uuid)
+                    skip(
+                        f"'{assignment['name']}' already has "
+                        f"'{tag_cfg['category']}/{tag_cfg['tag']}'"
+                    )
+                    continue
+
+                create(
+                    f"Assign '{tag_cfg['category']}/{tag_cfg['tag']}' "
+                    f"to '{assignment['name']}'"
+                )
+
+                vc_attach_tag(
+                    vc_rest,
+                    tag_id,
+                    dynamic_type,
+                    moid,
+                    vc_instance_uuid,
+                )
+
+                verify_deadline = time.time() + 30
+                verified: List[str] = []
+
+                while time.time() < verify_deadline:
+                    verified = vc_list_attached_tags(
+                        vc_rest,
+                        dynamic_type,
+                        moid,
+                        vc_instance_uuid,
+                    )
+
+                    if str(tag_id) in {
+                        str(value)
+                        for value in verified
+                    }:
+                        break
+
+                    time.sleep(2)
+
+                if str(tag_id) not in {
+                    str(value)
+                    for value in verified
+                }:
+                    raise RuntimeError(
+                        f"Tag assignment verification failed for "
+                        f"'{assignment['name']}' -> "
+                        f"'{tag_cfg['category']}/{tag_cfg['tag']}'. "
+                        f"vCenter returned attached tag IDs: {verified}"
+                    )
+
+                info(
+                    f"Assigned '{tag_cfg['category']}/{tag_cfg['tag']}' "
+                    f"to '{assignment['name']}'"
+                )
 
         print("\n========================================")
         print(" vCenter Compute Policies")

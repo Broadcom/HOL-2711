@@ -1,5 +1,5 @@
 {
-  "vcenter": {
+    "vcenter": {
     "server": "vc-wld01-a.site-a.vcf.lab",
     "ignore_certificate_errors": true,
     "username": "administrator@wld.sso",
@@ -56,16 +56,6 @@
               "tag": "linux"
             }
           ]
-        },
-        {
-          "type": "VirtualMachine",
-          "name": "vm-scitech-001",
-          "tags": [
-            {
-              "category": "os",
-              "tag": "linux"
-            }
-          ]
         }
       ]
     },
@@ -81,7 +71,8 @@
         "host_tag": {
           "category": "os",
           "tag": "linux"
-        }
+        },
+        "requirement": "Preferred"
       },
       {
         "name": "windows-vm-host-affinity",
@@ -94,7 +85,8 @@
         "host_tag": {
           "category": "os",
           "tag": "windows"
-        }
+        },
+        "requirement": "Preferred"
       }
     ]
   },
