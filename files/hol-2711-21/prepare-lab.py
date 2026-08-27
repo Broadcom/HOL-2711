@@ -3943,10 +3943,93 @@ def provider_organizations(client: RestClient):
     return client.paged("/cloudapi/1.0.0/orgs")
 
 
-def provider_organization(client: RestClient, name: str):
+def provider_organization(
+    client: RestClient,
+    name: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Resolve a provider organization robustly.
+
+    VCFA can reject creation with DUPLICATE_NAME even when an immediately
+    preceding unfiltered list call failed to surface the org. Try a direct
+    server-side name filter first, then fall back to a case-insensitive scan
+    of the full collection.
+    """
+    wanted = str(name or "").strip()
+    if not wanted:
+        return None
+
+    wanted_cf = wanted.casefold()
+
+    def _extract_values(payload: Any) -> List[Dict[str, Any]]:
+        if isinstance(payload, list):
+            return [
+                item for item in payload
+                if isinstance(item, dict)
+            ]
+
+        if not isinstance(payload, dict):
+            return []
+
+        for key in (
+            "values",
+            "items",
+            "orgs",
+            "organizations",
+        ):
+            values = payload.get(key)
+            if isinstance(values, list):
+                return [
+                    item for item in values
+                    if isinstance(item, dict)
+                ]
+
+        # Some endpoints may return one object directly.
+        if payload.get("name") or payload.get("id"):
+            return [payload]
+
+        return []
+
+    # Prefer a filtered lookup. Different VCFA builds have accepted slightly
+    # different filter encodings, so try the common CloudAPI forms.
+    filter_values = (
+        f"name=={wanted}",
+        f"(name=={wanted})",
+        f'name=="{wanted}"',
+    )
+
+    for filter_value in filter_values:
+        encoded = urllib.parse.quote(
+            filter_value,
+            safe="=()\"",
+        )
+
+        try:
+            payload = client.get(
+                f"/cloudapi/1.0.0/orgs"
+                f"?filter={encoded}&page=1&pageSize=128",
+                max_attempts=1,
+            )
+        except RuntimeError:
+            continue
+
+        for org in _extract_values(payload):
+            org_name = str(
+                org.get("name", "") or ""
+            ).strip()
+
+            if org_name.casefold() == wanted_cf:
+                return org
+
+    # Fall back to the complete paged collection.
     for org in provider_organizations(client):
-        if org.get("name") == name:
+        org_name = str(
+            org.get("name", "") or ""
+        ).strip()
+
+        if org_name.casefold() == wanted_cf:
             return org
+
     return None
 
 
@@ -3956,18 +4039,23 @@ def create_provider_organization_if_missing(
     timeout: int = 120,
     poll: int = 2,
 ):
-    name = str(cfg["name"])
+    name = str(cfg["name"]).strip()
 
     existing = provider_organization(client, name)
     if existing:
-        skip(f"VCFA organization '{name}' already exists")
+        skip(
+            f"VCFA organization '{name}' already exists "
+            f"[{object_id(existing) or 'no-id'}]"
+        )
         return existing
 
     body = {
         "name": name,
         "displayName": cfg.get("display_name", name),
         "description": cfg.get("description", ""),
-        "isClassicTenant": bool(cfg.get("is_classic_tenant", False)),
+        "isClassicTenant": bool(
+            cfg.get("is_classic_tenant", False)
+        ),
         "isProviderConsumptionOrg": bool(
             cfg.get("is_provider_consumption_org", False)
         ),
@@ -3976,24 +4064,71 @@ def create_provider_organization_if_missing(
 
     create(f"VCFA organization '{name}'")
 
-    created = client.post(
-        "/cloudapi/1.0.0/orgs",
-        json=body,
-    )
+    try:
+        created = client.post(
+            "/cloudapi/1.0.0/orgs",
+            json=body,
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+
+        if (
+            "DUPLICATE_NAME" not in message
+            and "already exists" not in message.casefold()
+        ):
+            raise
+
+        warn(
+            f"VCFA reported organization '{name}' already exists; "
+            "re-resolving the existing organization"
+        )
+
+        deadline = time.time() + max(5, timeout)
+
+        while time.time() < deadline:
+            existing = provider_organization(
+                client,
+                name,
+            )
+
+            if existing:
+                skip(
+                    f"VCFA organization '{name}' already exists "
+                    f"[{object_id(existing) or 'no-id'}]"
+                )
+                return existing
+
+            time.sleep(max(1, poll))
+
+        raise RuntimeError(
+            f"VCFA reported DUPLICATE_NAME for organization '{name}', "
+            f"but the existing organization could not be resolved through "
+            f"/cloudapi/1.0.0/orgs within {timeout} seconds. This usually "
+            "indicates a stale/partially deleted Tenant Manager record or "
+            "an organization not visible to the current provider session."
+        ) from exc
 
     # Some VCFA builds return the created Org body; others return
     # an empty/async response. Re-query by name before continuing.
     if isinstance(created, dict):
         created_id = object_id(created)
-        created_name = str(created.get("name", "") or "")
+        created_name = str(
+            created.get("name", "") or ""
+        ).strip()
 
-        if created_id and created_name == name:
+        if (
+            created_id
+            and created_name.casefold() == name.casefold()
+        ):
             return created
 
     deadline = time.time() + timeout
 
     while time.time() < deadline:
-        current = provider_organization(client, name)
+        current = provider_organization(
+            client,
+            name,
+        )
 
         if current:
             info(
@@ -9205,6 +9340,722 @@ def configure_organization_projects(
         )
 
 # ============================================================
+# Organization policies
+# ============================================================
+
+POLICY_TYPE_IDS = {
+    "lease": "com.vmware.policy.deployment.lease",
+    "approval": "com.vmware.policy.approval",
+    "day2_action": "com.vmware.policy.deployment.action",
+    "iaas_resource": "com.vmware.policy.supervisor.iaas",
+}
+
+POLICY_TYPE_ALIASES = {
+    "lease": "lease",
+    "approval": "approval",
+    "day2": "day2_action",
+    "day2_action": "day2_action",
+    "day2action": "day2_action",
+    "day2-action": "day2_action",
+    "day2_actions": "day2_action",
+    "day2-actions": "day2_action",
+    "iaas": "iaas_resource",
+    "iaas_resource": "iaas_resource",
+    "iaas-resource": "iaas_resource",
+    "resource": "iaas_resource",
+    "resource_policy": "iaas_resource",
+}
+
+
+def organization_policies(
+    client: RestClient,
+    policy_type_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    page = 0
+    size = 200
+    result: List[Dict[str, Any]] = []
+
+    while True:
+        params = [
+            "expandDefinition=true",
+            f"page={page}",
+            f"size={size}",
+        ]
+
+        if policy_type_id:
+            params.append(
+                "typeId="
+                + urllib.parse.quote(
+                    str(policy_type_id),
+                    safe="",
+                )
+            )
+
+        payload = client.get(
+            "/policy/api/policies?" + "&".join(params)
+        )
+
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                "Policy API returned an unexpected response"
+            )
+
+        values = payload.get("content") or []
+        if not isinstance(values, list):
+            raise RuntimeError(
+                "Policy API response field 'content' is not an array"
+            )
+
+        result.extend(
+            item
+            for item in values
+            if isinstance(item, dict)
+        )
+
+        if bool(payload.get("last", False)):
+            break
+
+        total_pages = payload.get("totalPages")
+        if (
+            isinstance(total_pages, int)
+            and page + 1 >= total_pages
+        ):
+            break
+
+        if len(values) < size:
+            break
+
+        page += 1
+
+    return result
+
+
+def _normalize_policy_type(value: Any) -> str:
+    normalized = str(value or "").strip().casefold()
+
+    if normalized not in POLICY_TYPE_ALIASES:
+        raise RuntimeError(
+            f"Unsupported policy type '{value}'. Supported types: "
+            "lease, approval, day2_action, iaas_resource"
+        )
+
+    return POLICY_TYPE_ALIASES[normalized]
+
+
+def _policy_by_name(
+    client: RestClient,
+    name: str,
+    policy_type: str,
+) -> Optional[Dict[str, Any]]:
+    wanted = str(name or "").strip().casefold()
+    type_id = POLICY_TYPE_IDS[policy_type]
+
+    for policy in organization_policies(
+        client,
+        type_id,
+    ):
+        if (
+            str(policy.get("name", "") or "")
+            .strip()
+            .casefold()
+            == wanted
+        ):
+            return policy
+
+    return None
+
+
+def _project_id_by_name(
+    client: RestClient,
+    project_name: str,
+) -> str:
+    project = _project_by_name(
+        client,
+        project_name,
+    )
+
+    if not project:
+        raise RuntimeError(
+            f"Project '{project_name}' was not found in the "
+            "current organization"
+        )
+
+    project_id = str(
+        project.get("id", "") or ""
+    ).strip()
+
+    if not project_id:
+        raise RuntimeError(
+            f"Project '{project_name}' does not expose an ID"
+        )
+
+    if project_id.startswith("urn:"):
+        project_id = project_id.rsplit(":", 1)[-1]
+
+    return project_id
+
+
+
+def _policy_definition(
+    policy_type: str,
+    cfg: Dict[str, Any],
+    name: str,
+) -> Dict[str, Any]:
+    raw_definition = cfg.get("definition")
+
+    if raw_definition is None:
+        raw_definition = {}
+
+    if not isinstance(raw_definition, dict):
+        raise RuntimeError(
+            f"Policy '{name}'.definition must be an object"
+        )
+
+    if policy_type == "lease":
+        lease_grace = int(
+            raw_definition.get(
+                "lease_grace_days",
+                cfg.get("lease_grace_days", 0),
+            )
+        )
+        lease_term_max = int(
+            raw_definition.get(
+                "lease_term_max_days",
+                cfg.get("lease_term_max_days", 0),
+            )
+        )
+        lease_total_term_max = int(
+            raw_definition.get(
+                "lease_total_term_max",
+                raw_definition.get(
+                    "lease_total_term_max_days",
+                    cfg.get(
+                        "lease_total_term_max_days",
+                        0,
+                    ),
+                ),
+            )
+        )
+
+        if not 0 <= lease_grace <= 127:
+            raise RuntimeError(
+                f"Lease policy '{name}'.definition.lease_grace_days "
+                "must be between 0 and 127"
+            )
+
+        if not 1 <= lease_term_max <= 32767:
+            raise RuntimeError(
+                f"Lease policy '{name}'.definition.lease_term_max_days "
+                "must be between 1 and 32767"
+            )
+
+        if not 1 <= lease_total_term_max <= 32767:
+            raise RuntimeError(
+                f"Lease policy '{name}'.definition.lease_total_term_max "
+                "must be between 1 and 32767"
+            )
+
+        if lease_total_term_max < lease_term_max:
+            raise RuntimeError(
+                f"Lease policy '{name}'.definition."
+                "lease_total_term_max cannot be less than "
+                "lease_term_max_days"
+            )
+
+        return {
+            "leaseGrace": lease_grace,
+            "leaseTermMax": lease_term_max,
+            "leaseTotalTermMax": lease_total_term_max,
+        }
+
+    if policy_type == "day2_action":
+        allowed_actions = (
+            raw_definition.get("allowed_actions")
+            or raw_definition.get("allowedActions")
+            or []
+        )
+
+        if not isinstance(allowed_actions, list) or not allowed_actions:
+            raise RuntimeError(
+                f"Day-2 action policy '{name}'.definition."
+                "allowed_actions must be a non-empty array"
+            )
+
+        normalized_actions = []
+
+        for item in allowed_actions:
+            if not isinstance(item, dict):
+                raise RuntimeError(
+                    f"Day-2 action policy '{name}'.definition."
+                    "allowed_actions entries must be objects"
+                )
+
+            actions = item.get("actions") or []
+            authorities = item.get("authorities") or []
+
+            if not isinstance(actions, list) or not actions:
+                raise RuntimeError(
+                    f"Day-2 action policy '{name}' has an "
+                    "allowed_actions entry without actions"
+                )
+
+            if not isinstance(authorities, list) or not authorities:
+                raise RuntimeError(
+                    f"Day-2 action policy '{name}' has an "
+                    "allowed_actions entry without authorities"
+                )
+
+            normalized_actions.append(
+                {
+                    "actions": actions,
+                    "authorities": authorities,
+                }
+            )
+
+        return {
+            "allowedActions": normalized_actions,
+        }
+
+    if policy_type == "approval":
+        allowed_actions = (
+            raw_definition.get("allowed_actions")
+            or raw_definition.get("allowedActions")
+            or []
+        )
+
+        if not isinstance(allowed_actions, list) or not allowed_actions:
+            raise RuntimeError(
+                f"Approval policy '{name}'.definition."
+                "allowed_actions must be a non-empty array"
+            )
+
+        normalized_actions = []
+
+        for item in allowed_actions:
+            if not isinstance(item, dict):
+                raise RuntimeError(
+                    f"Approval policy '{name}'.definition."
+                    "allowed_actions entries must be objects"
+                )
+
+            actions = item.get("actions") or []
+            approvers = item.get("approvers") or []
+
+            if not isinstance(actions, list) or not actions:
+                raise RuntimeError(
+                    f"Approval policy '{name}' has an "
+                    "allowed_actions entry without actions"
+                )
+
+            if not isinstance(approvers, list) or not approvers:
+                raise RuntimeError(
+                    f"Approval policy '{name}' has an "
+                    "allowed_actions entry without approvers"
+                )
+
+            normalized_actions.append(
+                {
+                    "actions": actions,
+                    "approvers": approvers,
+                    "approvalMode": str(
+                        item.get("approval_mode", "ANY_OF")
+                        or "ANY_OF"
+                    ).strip().upper(),
+                    "approverType": str(
+                        item.get(
+                            "approval_type",
+                            item.get("approver_type", "ROLE"),
+                        )
+                        or "ROLE"
+                    ).strip().upper(),
+                    "autoApprovalExpiry": int(
+                        item.get(
+                            "auto_approval_expiry_days",
+                            1,
+                        )
+                    ),
+                    "autoApprovalDecision": str(
+                        item.get(
+                            "auto_approval_decision",
+                            "REJECT",
+                        )
+                        or "REJECT"
+                    ).strip().upper(),
+                }
+            )
+
+        return {
+            "allowedActions": normalized_actions,
+        }
+
+    if policy_type == "iaas_resource":
+        automation_policy = (
+            raw_definition.get("automation_policy")
+            or raw_definition.get("automationPolicy")
+            or cfg.get("automation_policy")
+            or cfg.get("automationPolicy")
+        )
+
+        if not isinstance(automation_policy, dict):
+            raise RuntimeError(
+                f"IaaS resource policy '{name}' requires "
+                "definition.automation_policy"
+            )
+
+        return {
+            "automationPolicy": automation_policy,
+        }
+
+    raise RuntimeError(
+        f"Unsupported policy type '{policy_type}'"
+    )
+
+
+def _normalize_policy_config(
+    client: RestClient,
+    cfg: Dict[str, Any],
+) -> Dict[str, Any]:
+    if not isinstance(cfg, dict):
+        raise RuntimeError(
+            "Each policies entry must be an object"
+        )
+
+    policy_type = _normalize_policy_type(
+        cfg.get("type")
+    )
+
+    name = str(
+        cfg.get("name", "") or ""
+    ).strip()
+
+    if not name:
+        raise RuntimeError(
+            f"Each {policy_type} policy requires 'name'"
+        )
+
+    scope = str(
+        cfg.get("scope", "organization")
+        or "organization"
+    ).strip().casefold()
+
+    if scope in {"org", "organization"}:
+        scope = "organization"
+    elif scope == "project":
+        scope = "project"
+    else:
+        raise RuntimeError(
+            f"Policy '{name}' has unsupported scope '{scope}'. "
+            "Expected 'organization' or 'project'"
+        )
+
+    enforcement_type = str(
+        cfg.get("enforcement_type", "HARD")
+        or "HARD"
+    ).strip().upper()
+
+    if enforcement_type not in {"HARD", "SOFT"}:
+        raise RuntimeError(
+            f"Policy '{name}' has invalid enforcement_type "
+            f"'{enforcement_type}'. Expected HARD or SOFT"
+        )
+
+    project_id = None
+    project_name = None
+
+    if scope == "project":
+        project_name = str(
+            cfg.get("project_name", "") or ""
+        ).strip()
+
+        if not project_name:
+            raise RuntimeError(
+                f"Policy '{name}' with scope='project' "
+                "requires project_name"
+            )
+
+        project_id = _project_id_by_name(
+            client,
+            project_name,
+        )
+
+    criteria = cfg.get("criteria")
+    if criteria is not None and not isinstance(
+        criteria,
+        dict,
+    ):
+        raise RuntimeError(
+            f"Policy '{name}'.criteria must be an object"
+        )
+
+    desired: Dict[str, Any] = {
+        "name": name,
+        "description": str(
+            cfg.get("description", "") or ""
+        ),
+        "typeId": POLICY_TYPE_IDS[policy_type],
+        "enforcementType": enforcement_type,
+        "definition": _policy_definition(
+            policy_type,
+            cfg,
+            name,
+        ),
+    }
+
+    if project_id:
+        desired["projectId"] = project_id
+
+    if criteria:
+        desired["criteria"] = criteria
+
+    return {
+        "policy_type": policy_type,
+        "scope": scope,
+        "project_name": project_name,
+        "desired": desired,
+    }
+
+
+def _policy_comparable(
+    policy: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if not isinstance(policy, dict):
+        return {}
+
+    result: Dict[str, Any] = {
+        "name": str(
+            policy.get("name", "") or ""
+        ).strip(),
+        "description": str(
+            policy.get("description", "") or ""
+        ),
+        "typeId": str(
+            policy.get("typeId", "") or ""
+        ).strip(),
+        "enforcementType": str(
+            policy.get("enforcementType", "") or ""
+        ).strip().upper(),
+        "definition": (
+            policy.get("definition")
+            if isinstance(
+                policy.get("definition"),
+                dict,
+            )
+            else {}
+        ),
+    }
+
+    project_id = str(
+        policy.get("projectId", "") or ""
+    ).strip()
+
+    if project_id:
+        if project_id.startswith("urn:"):
+            project_id = project_id.rsplit(":", 1)[-1]
+
+        result["projectId"] = project_id
+
+    criteria = policy.get("criteria")
+    if isinstance(criteria, dict) and criteria:
+        result["criteria"] = criteria
+
+    return result
+
+
+def configure_organization_policy(
+    client: RestClient,
+    org_name: str,
+    cfg: Dict[str, Any],
+) -> None:
+    normalized = _normalize_policy_config(
+        client,
+        cfg,
+    )
+
+    policy_type = normalized["policy_type"]
+    scope = normalized["scope"]
+    project_name = normalized["project_name"]
+    desired = normalized["desired"]
+    name = desired["name"]
+
+    existing = _policy_by_name(
+        client,
+        name,
+        policy_type,
+    )
+
+    desired_compare = _policy_comparable(
+        desired
+    )
+    existing_compare = _policy_comparable(
+        existing
+    )
+
+    scope_text = (
+        f"project '{project_name}'"
+        if scope == "project"
+        else f"organization '{org_name}'"
+    )
+
+    display_type = {
+        "lease": "Lease",
+        "approval": "Approval",
+        "day2_action": "Day-2 action",
+        "iaas_resource": "IaaS resource",
+    }[policy_type]
+
+    if existing and existing_compare == desired_compare:
+        skip(
+            f"{display_type} policy '{name}' already matches "
+            f"configuration at {scope_text} scope"
+        )
+        return
+
+    body = dict(desired)
+
+    if existing:
+        policy_id = str(
+            existing.get("id", "") or ""
+        ).strip()
+
+        if not policy_id:
+            raise RuntimeError(
+                f"Existing policy '{name}' has no ID"
+            )
+
+        body["id"] = policy_id
+
+        differences = []
+
+        for key in (
+            "description",
+            "enforcementType",
+            "projectId",
+            "definition",
+            "criteria",
+        ):
+            if (
+                existing_compare.get(key)
+                != desired_compare.get(key)
+            ):
+                differences.append(key)
+
+        info(
+            f"{display_type} policy '{name}' differs from desired "
+            f"configuration: {', '.join(differences)}"
+        )
+
+        update(
+            f"{display_type} policy '{name}' at "
+            f"{scope_text} scope"
+        )
+    else:
+        create(
+            f"{display_type} policy '{name}' at "
+            f"{scope_text} scope"
+        )
+
+    info(
+        f"{display_type} policy payload for '{name}':\n"
+        f"{json.dumps(body, indent=2)}"
+    )
+
+    client.post(
+        "/policy/api/policies",
+        json=body,
+    )
+
+    current = _policy_by_name(
+        client,
+        name,
+        policy_type,
+    )
+
+    if not current:
+        raise RuntimeError(
+            f"{display_type} policy '{name}' was submitted "
+            "but could not be queried afterwards"
+        )
+
+    current_compare = _policy_comparable(
+        current
+    )
+
+    if current_compare != desired_compare:
+        raise RuntimeError(
+            f"{display_type} policy '{name}' was submitted but "
+            f"does not match desired configuration.\n"
+            f"Desired:\n"
+            f"{json.dumps(desired_compare, indent=2)}\n"
+            f"Current:\n"
+            f"{json.dumps(current_compare, indent=2)}"
+        )
+
+    info(
+        f"{display_type} policy '{name}' verified at "
+        f"{scope_text} scope"
+    )
+
+
+def configure_organization_policies(
+    client: RestClient,
+    org_name: str,
+    policies_cfg: Any,
+) -> None:
+    if policies_cfg in (None, [], {}):
+        return
+
+    if not isinstance(policies_cfg, list):
+        raise RuntimeError(
+            f"vcfa.organizations['{org_name}'].policies "
+            "must be an array"
+        )
+
+    seen = set()
+
+    for cfg in policies_cfg:
+        if not isinstance(cfg, dict):
+            raise RuntimeError(
+                f"Each policy in organization '{org_name}' "
+                "must be an object"
+            )
+
+        name = str(
+            cfg.get("name", "") or ""
+        ).strip()
+
+        if not name:
+            raise RuntimeError(
+                f"Each policy in organization '{org_name}' "
+                "requires 'name'"
+            )
+
+        policy_type = _normalize_policy_type(
+            cfg.get("type")
+        )
+
+        key = (
+            policy_type,
+            name.casefold(),
+        )
+
+        if key in seen:
+            raise RuntimeError(
+                f"Policy '{name}' of type '{policy_type}' "
+                f"is configured more than once in organization "
+                f"'{org_name}'"
+            )
+
+        seen.add(key)
+
+        configure_organization_policy(
+            client,
+            org_name,
+            cfg,
+        )
+
+
+# ============================================================
+
 # Organization Supervisor Namespaces (CCI)
 # ============================================================
 
@@ -10587,10 +11438,13 @@ def main():
                     "item processing is not implemented yet"
                 )
 
-            if org_cfg.get("policies"):
-                warn(
-                    f"policies configured for '{name}' but policy "
-                    "processing is not implemented yet"
+            policies_cfg = org_cfg.get("policies") or []
+            if policies_cfg:
+                print(f"\n--- Policies: {name} ---")
+                configure_organization_policies(
+                    org_client,
+                    name,
+                    policies_cfg,
                 )
 
             if org_cfg.get("deployments"):

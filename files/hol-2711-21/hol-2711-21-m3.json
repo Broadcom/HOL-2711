@@ -900,10 +900,9 @@
           {
             "name": "Project Lease Policy",
             "type": "lease",
-            "description": "",
-            "enabled": true,
-            "enforcement_type": "HARD",
             "scope": "project",
+            "description": "",
+            "enforcement_type": "HARD",
             "project_name": "next-big-medtech-app",
             "definition": {
               "lease_grace_days": 1,
@@ -913,21 +912,69 @@
             
           },
           {
-            "name": "vm-day2-actions",
+            "name": "Org Admin Day 2 Policy",
             "type": "day2action",
             "scope": "project",
-            "project_name": "new-scitech-app",
+            "project_name": "next-big-medtech-app",
             "enforcement_type": "HARD",
-            "allowed_actions": [
-              {
-                "actions": [
-                  "CCI.Supervisor.Resource.VirtualMachine.Remove.Disk"
-                ],
-                "authorities": [
-                  "ROLE:administrator"
-                ]
-              }
-            ]
+            "definition": {
+              "allowed_actions": [
+                {
+                  "actions": [
+                    "*"
+                  ],
+                  "authorities": [
+                    "ROLE:administrator"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "name": "Project Day 2 Policy",
+            "type": "day2action",
+            "scope": "project",
+            "project_name": "next-big-medtech-app",
+            "enforcement_type": "HARD",
+            "definition": {
+              "allowed_actions": [
+                {
+                  "actions": [
+                    "CCI.Supervisor.Resource.*",
+                    "Deployment.PowerOn",
+                    "Deployment.PowerOff"
+                  ],
+                  "authorities": [
+                    "ROLE:member"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "name": "Organization Approval Policy",
+            "type": "approval",
+            "scope": "organization",
+            "project_name": null,
+            "enforcement_type": "HARD",
+            "definition": {
+              "allowed_actions": [
+                {
+                  "actions": [
+                    "CCI.Supervisor.Resource.VirtualMachine.PowerOff",
+                    "Deployment.Create",
+                    "Deployment.Delete"
+                  ],
+                  "approvers": [
+                    "ROLE:PROJECT_ADMINISTRATORS"
+                  ],
+                  "approval_mode": "ANY_OF",
+                  "approval_type": "ROLE",
+                  "auto_approval_expiry_days": 1,
+                  "auto_approval_decision": "REJECT"
+                }
+              ]
+            }
           }
         ],
         "deployments":[]
