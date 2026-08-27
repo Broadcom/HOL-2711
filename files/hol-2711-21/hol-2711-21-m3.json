@@ -896,7 +896,40 @@
         ],
         "blueprints": [],
         "catalog_items": [],
-        "policies":[],
+        "policies":[
+          {
+            "name": "Project Lease Policy",
+            "type": "lease",
+            "description": "",
+            "enabled": true,
+            "enforcement_type": "HARD",
+            "scope": "project",
+            "project_name": "next-big-medtech-app",
+            "definition": {
+              "lease_grace_days": 1,
+              "lease_term_max_days": 1,
+              "lease_total_term_max": 5
+            }
+            
+          },
+          {
+            "name": "vm-day2-actions",
+            "type": "day2action",
+            "scope": "project",
+            "project_name": "new-scitech-app",
+            "enforcement_type": "HARD",
+            "allowed_actions": [
+              {
+                "actions": [
+                  "CCI.Supervisor.Resource.VirtualMachine.Remove.Disk"
+                ],
+                "authorities": [
+                  "ROLE:administrator"
+                ]
+              }
+            ]
+          }
+        ],
         "deployments":[]
       }
     }
