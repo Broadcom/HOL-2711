@@ -1,0 +1,26 @@
+validations:
+  - message: Control plane nodes must be 1
+    expression: object.spec.topology.controlPlane.replicas == 1
+failurePolicy: Fail
+matchConstraints:
+  resourceRules:
+    - apiGroups:
+        - run.tanzu.vmware.com
+      resources:
+        - tanzukubernetesclusters
+      operations:
+        - CREATE
+        - UPDATE
+      apiVersions:
+        - "*"
+    - apiGroups:
+        - cluster.x-k8s.io
+      resources:
+        - clusters
+      operations:
+        - CREATE
+        - UPDATE
+      apiVersions:
+        - "*"
+validationActions:
+  - Deny

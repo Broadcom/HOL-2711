@@ -204,7 +204,7 @@
         }
       },
       "organizations": {
-        "intech": {
+        "fintech": {
           "display_name": "FinTech",
           "description": "FinTech Tenant",
           "is_classic_tenant": true,
@@ -904,6 +904,7 @@
             "description": "",
             "enforcement_type": "HARD",
             "project_name": "next-big-medtech-app",
+            "criteria": {},
             "definition": {
               "lease_grace_days": 1,
               "lease_term_max_days": 1,
@@ -917,6 +918,7 @@
             "scope": "project",
             "project_name": "next-big-medtech-app",
             "enforcement_type": "HARD",
+            "criteria": {},
             "definition": {
               "allowed_actions": [
                 {
@@ -955,8 +957,9 @@
             "name": "Organization Approval Policy",
             "type": "approval",
             "scope": "organization",
-            "project_name": null,
+            "project_name": "next-big-medtech-app",
             "enforcement_type": "HARD",
+            "criteria": {},
             "definition": {
               "allowed_actions": [
                 {
@@ -974,6 +977,25 @@
                   "auto_approval_decision": "REJECT"
                 }
               ]
+            }
+          },
+                    {
+            "name": "project-iaas-policy",
+            "type": "iaas_resource",
+            "scope": "project",
+            "project_name": null,
+            "enforcement_type": "HARD",
+            "criteria":{
+              "match_expression": [
+                {
+                  "key": "name",
+                  "operator": "eq",
+                  "value": "ns-next-big-medtech-app"
+                }
+              ]
+            },
+            "definition": {
+              "definition_file": "/home/holuser/Documents/files/hol-2711-21/project-iaas-policy.yaml"
             }
           }
         ],
