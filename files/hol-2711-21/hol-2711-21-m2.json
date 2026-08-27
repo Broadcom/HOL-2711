@@ -360,7 +360,7 @@
                 {
                   "region": "us-east-a",
                   "name": "vSAN Default Storage Policy",
-                  "storage_limit_mib": 250000                   
+                  "storage_limit_mib": 500000                   
                 }
               ],
               "infra_policies": {

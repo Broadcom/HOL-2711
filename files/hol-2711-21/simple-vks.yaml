@@ -1,0 +1,103 @@
+formatVersion: 2
+name: VKS Guest Cluster
+description: Deploy a VKS Kubernetes guest cluster
+inputs:
+  namespace:
+    type: string
+    title: Namespace
+    $data: /data/namespaces
+  vm_class:
+    type: string
+    title: VM Class / Size
+    $data: /data/virtualmachineclasses?namespace={{namespace}}
+outputs:
+  controlPlaneEndpoint:
+    value: ${resource.Kubernetes_Cluster_1.object.spec.controlPlaneEndpoint.host}:${resource.Kubernetes_Cluster_1.object.spec.controlPlaneEndpoint.port}
+  clusterName:
+    value: ${resource.Kubernetes_Cluster_1.object.metadata.name}
+  __deploymentOverview:
+    value: |-
+      ## VKS Kubernetes cluster
+
+      * Cluster: `${resource.Kubernetes_Cluster_1.object.metadata.name}`
+      * Namespace: `${input.namespace}`
+      * Control plane API: `https://${resource.Kubernetes_Cluster_1.object.spec.controlPlaneEndpoint.host}:${resource.Kubernetes_Cluster_1.object.spec.controlPlaneEndpoint.port}`
+      * Control plane nodes ready: `${resource.Kubernetes_Cluster_1.object.status.controlPlane.readyReplicas}`
+
+      **Get a kubeconfig and connect** (the `kubectl-vsphere` plugin is
+      deprecated and is not installed on the console; use the VCF CLI):
+
+      ```
+      vcf context create gc --endpoint 10.1.8.132 \
+        --insecure-skip-tls-verify --type k8s --auth-type basic \
+        --username administrator@wld.sso \
+        --workload-cluster-name ${resource.Kubernetes_Cluster_1.object.metadata.name} \
+        --workload-cluster-namespace ${input.namespace}
+
+      vcf context use gc:${resource.Kubernetes_Cluster_1.object.metadata.name}
+      kubectl get nodes
+      ```
+
+      You can also download a kubeconfig for this cluster from its page in the
+      VCF Automation UI.
+resources:
+  CCI_Supervisor_Namespace_1:
+    type: CCI.Supervisor.Namespace
+    properties:
+      name: ${input.namespace}
+      existing: true
+  Kubernetes_Cluster_1:
+    type: CCI.Supervisor.Resource
+    properties:
+      context: ${resource.CCI_Supervisor_Namespace_1.id}
+      manifest:
+        apiVersion: cluster.x-k8s.io/v1beta1
+        kind: Cluster
+        metadata:
+          name: kubernetes-cluster-1-${env.shortDeploymentId}
+        spec:
+          clusterNetwork:
+            pods:
+              cidrBlocks:
+                - 192.168.156.0/20
+            services:
+              cidrBlocks:
+                - 10.96.0.0/12
+          topology:
+            class: builtin-generic-v3.3.0
+            version: v1.35.5---vmware.1-vkr.1
+            variables:
+              - name: vsphereOptions
+                value:
+                  persistentVolumes:
+                    defaultStorageClass: vsan-default-storage-policy
+              - name: kubernetes
+                value:
+                  certificateRotation:
+                    enabled: true
+                    renewalDaysBeforeExpiry: 90
+              - name: vmClass
+                value: ${input.vm_class}
+              - name: storageClass
+                value: vsan-default-storage-policy
+            controlPlane:
+              replicas: 1
+              metadata:
+                annotations:
+                  run.tanzu.vmware.com/resolve-os-image: os-name=ubuntu, os-version=24.04, content-library=cl-b37cec53ff29e2cf7
+            workers:
+              machineDeployments:
+                - class: node-pool
+                  name: kubernetes-cluster-yxtx-nodepool-63yr
+                  replicas: 1
+                  metadata:
+                    annotations:
+                      run.tanzu.vmware.com/resolve-os-image: os-name=ubuntu, os-version=24.04, content-library=cl-b37cec53ff29e2cf7
+      # Wait for Ready before the resource completes. Without this the object
+      # snapshot can be taken before spec.controlPlaneEndpoint is populated, and
+      # an output referencing it is then SILENTLY DROPPED (the key just vanishes
+      # from the outputs map). See blueprints/README.md.
+      wait:
+        conditions:
+          - type: Ready
+            status: 'True'

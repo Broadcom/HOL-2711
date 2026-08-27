@@ -1,0 +1,82 @@
+formatVersion: 2
+name: Container Based Nginx Web Server
+description: Deploy an NGINX web server as vSphere Pods, published on a load balancer
+outputs:
+  __deploymentOverview:
+    value: |-
+      ## Web Server (vSphere Pods)
+
+      This blueprint deployed an **nginx** container into the supervisor
+      namespace as vSphere Pods, and published it with a load balancer.
+
+      * Namespace: `${input.namespace}`
+      * Application: `${input.appname}`
+      * Image pulled from the lab registry (Harbor), not the internet
+
+      **Find your site:** on the Services page look for the service named
+
+      ```
+      app-lb-${input.appname}-${env.shortDeploymentId}
+      ```
+
+      and browse its **External IP** on port 80. Each deployment gets its own
+      uniquely named service and its own IP, so match the name exactly.
+inputs:
+  namespace:
+    type: string
+    title: Namespace
+    $data: /data/namespaces
+  appname:
+    type: string
+    default: nginx-web-server
+resources:
+  SupervisorNamespace:
+    type: CCI.Supervisor.Namespace
+    properties:
+      name: ${input.namespace}
+      existing: true
+  nginxLoadBalancer:
+    type: CCI.Supervisor.Resource
+    properties:
+      context: ${resource.SupervisorNamespace.id}
+      manifest:
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: app-lb-${input.appname}-${env.shortDeploymentId}
+        spec:
+          selector:
+            app: ${input.appname}-${env.shortDeploymentId}
+          ports:
+            - name: http
+              protocol: TCP
+              port: 80
+              targetPort: 80
+          type: LoadBalancer
+  nginxWebServer:
+    type: CCI.Supervisor.Resource
+    properties:
+      context: ${resource.SupervisorNamespace.id}
+      manifest:
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: deployment-${input.appname}-${env.shortDeploymentId}
+          labels:
+            app: ${input.appname}-${env.shortDeploymentId}
+        spec:
+          selector:
+            matchLabels:
+              app: ${input.appname}-${env.shortDeploymentId}
+          template:
+            metadata:
+              labels:
+                app: ${input.appname}-${env.shortDeploymentId}
+            spec:
+              containers:
+                - image: depot.kube-system.svc/hol/nginx:alpine
+                  name: nginx
+                  ports:
+                    - containerPort: 80
+                      name: http
+                      protocol: TCP

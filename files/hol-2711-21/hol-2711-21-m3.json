@@ -204,7 +204,7 @@
         }
       },
       "organizations": {
-        "fintech": {
+        "intech": {
           "display_name": "FinTech",
           "description": "FinTech Tenant",
           "is_classic_tenant": true,
@@ -828,7 +828,7 @@
             "zones": [
               {
                 "name": "*",
-                "cpu_limit": "10000M",
+                "cpu_limit": "5000M",
                 "cpu_reservation": "0M",
                 "memory_limit": "10240Mi",
                 "memory_reservation": "0Mi"
