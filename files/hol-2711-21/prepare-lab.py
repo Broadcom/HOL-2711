@@ -16,6 +16,10 @@ import xml.etree.ElementTree as ET
 
 import requests
 import urllib3
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 try:
     from pyVim.connect import SmartConnect, Disconnect
@@ -9567,15 +9571,78 @@ def _project_id_by_name(
 
 
 
+def _load_policy_definition_file(
+    cfg: Dict[str, Any],
+    policy_name: str,
+    config_dir: Path,
+) -> Optional[Dict[str, Any]]:
+    definition = cfg.get("definition")
+    nested_definition_file = ""
+
+    if isinstance(definition, dict):
+        nested_definition_file = str(
+            definition.get("definition_file", "") or ""
+        ).strip()
+
+    definition_file = str(
+        cfg.get("definition_file", "") or nested_definition_file
+    ).strip()
+
+    if not definition_file:
+        return None
+
+    if yaml is None:
+        raise RuntimeError(
+            f"Policy '{policy_name}' uses definition_file but PyYAML "
+            "is not installed. Install it with: python3 -m pip install pyyaml"
+        )
+
+    path = resolve_path(
+        definition_file,
+        config_dir,
+    )
+
+    if not path.exists():
+        raise RuntimeError(
+            f"Policy '{policy_name}' definition_file not found: {path}"
+        )
+
+    with path.open("r", encoding="utf-8") as handle:
+        loaded = yaml.safe_load(handle)
+
+    if loaded is None:
+        loaded = {}
+
+    if not isinstance(loaded, dict):
+        raise RuntimeError(
+            f"Policy '{policy_name}' definition_file must contain a YAML object"
+        )
+
+    info(
+        f"Loaded policy definition for '{policy_name}' from '{path}'"
+    )
+
+    return loaded
+
 def _policy_definition(
     policy_type: str,
     cfg: Dict[str, Any],
     name: str,
+    config_dir: Path,
 ) -> Dict[str, Any]:
-    raw_definition = cfg.get("definition")
+    file_definition = _load_policy_definition_file(
+        cfg,
+        name,
+        config_dir,
+    )
 
-    if raw_definition is None:
-        raw_definition = {}
+    if file_definition is not None:
+        raw_definition = file_definition
+    else:
+        raw_definition = cfg.get("definition")
+
+        if raw_definition is None:
+            raw_definition = {}
 
     if not isinstance(raw_definition, dict):
         raise RuntimeError(
@@ -9772,6 +9839,26 @@ def _policy_definition(
         }
 
     if policy_type == "iaas_resource":
+        # Accept either:
+        #
+        #   "definition": {
+        #       "automation_policy": { ... }
+        #   }
+        #
+        #   "definition": {
+        #       "automationPolicy": { ... }
+        #   }
+        #
+        # or, more conveniently, treat definition itself as the
+        # automationPolicy body:
+        #
+        #   "definition": {
+        #       "validations": [...],
+        #       "failurePolicy": "Fail",
+        #       "matchConstraints": {...},
+        #       "validationActions": ["Deny"]
+        #   }
+        #
         automation_policy = (
             raw_definition.get("automation_policy")
             or raw_definition.get("automationPolicy")
@@ -9779,10 +9866,22 @@ def _policy_definition(
             or cfg.get("automationPolicy")
         )
 
-        if not isinstance(automation_policy, dict):
+        if automation_policy is None and raw_definition:
+            automation_policy = {
+                key: value
+                for key, value in raw_definition.items()
+                if key not in {
+                    "definition_file",
+                    "criteria",
+                }
+            }
+
+        if not isinstance(automation_policy, dict) or not automation_policy:
             raise RuntimeError(
-                f"IaaS resource policy '{name}' requires "
-                "definition.automation_policy"
+                f"IaaS resource policy '{name}' requires a non-empty "
+                "definition. The definition may either contain "
+                "'automation_policy'/'automationPolicy', or be the "
+                "automationPolicy body directly."
             )
 
         return {
@@ -9895,6 +9994,7 @@ def _normalize_policy_criteria(
 def _normalize_policy_config(
     client: RestClient,
     cfg: Dict[str, Any],
+    config_dir: Path,
 ) -> Dict[str, Any]:
     if not isinstance(cfg, dict):
         raise RuntimeError(
@@ -9975,6 +10075,7 @@ def _normalize_policy_config(
             policy_type,
             cfg,
             name,
+            config_dir,
         ),
     }
 
@@ -10042,10 +10143,12 @@ def configure_organization_policy(
     client: RestClient,
     org_name: str,
     cfg: Dict[str, Any],
+    config_dir: Path,
 ) -> None:
     normalized = _normalize_policy_config(
         client,
         cfg,
+        config_dir,
     )
 
     policy_type = normalized["policy_type"]
@@ -10177,6 +10280,7 @@ def configure_organization_policies(
     client: RestClient,
     org_name: str,
     policies_cfg: Any,
+    config_dir: Path,
 ) -> None:
     if policies_cfg in (None, [], {}):
         return
@@ -11697,6 +11801,7 @@ def main():
                     org_client,
                     name,
                     policies_cfg,
+                    config_dir,
                 )
 
             if org_cfg.get("deployments"):
