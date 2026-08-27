@@ -889,7 +889,7 @@
             "storage_classes": [
               {
                 "name":"vSAN Default Storage Policy",
-                "limit": "250000Mi"
+                "limit": "200000Mi"
               }
             ]
           }
@@ -982,7 +982,7 @@
                     {
             "name": "project-iaas-policy",
             "type": "iaas_resource",
-            "scope": "project",
+            "scope": "organization",
             "project_name": null,
             "enforcement_type": "HARD",
             "criteria":{

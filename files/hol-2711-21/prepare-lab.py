@@ -353,6 +353,77 @@ class CciClient:
 
         return None
 
+
+    def find_supervisor_namespace_by_generate_name(
+        self,
+        project: str,
+        generate_name: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Find an already-generated SupervisorNamespace from the configured
+        Kubernetes generateName prefix.
+
+        Used only when JSON `name` is empty. Exact `name` lookup remains the
+        preferred reconciliation key whenever a concrete name is configured.
+        """
+        prefix = str(generate_name or "").strip().casefold()
+        if not prefix:
+            return None
+
+        matches: List[Dict[str, Any]] = []
+
+        for item in self.list_supervisor_namespaces(project):
+            meta = item.get("metadata") or {}
+            if not isinstance(meta, dict):
+                continue
+
+            actual_name = str(
+                meta.get("name", "") or ""
+            ).strip()
+
+            if actual_name.casefold().startswith(prefix):
+                matches.append(item)
+
+        if not matches:
+            return None
+
+        def sort_key(item: Dict[str, Any]):
+            meta = item.get("metadata") or {}
+            if not isinstance(meta, dict):
+                meta = {}
+
+            created = str(
+                meta.get("creationTimestamp", "") or ""
+            ).strip()
+
+            actual_name = str(
+                meta.get("name", "") or ""
+            ).strip().casefold()
+
+            return (created, actual_name)
+
+        matches.sort(key=sort_key)
+
+        if len(matches) > 1:
+            names = []
+            for item in matches:
+                meta = item.get("metadata") or {}
+                if isinstance(meta, dict):
+                    candidate_name = str(
+                        meta.get("name", "") or ""
+                    ).strip()
+                    if candidate_name:
+                        names.append(candidate_name)
+
+            warn(
+                f"Found {len(matches)} Supervisor namespaces in project "
+                f"'{project}' matching generateName prefix '{generate_name}': "
+                f"{names}. Using '{names[0] if names else '<first match>'}' "
+                "and not creating another namespace."
+            )
+
+        return matches[0]
+
     def create_supervisor_namespace(self, project: str, payload: Dict[str, Any]):
         return self.rest.post(
             self.namespaced_path(project, self.SUPERVISOR_NAMESPACE_RESOURCE),
@@ -9629,63 +9700,75 @@ def _policy_definition(
                 "allowed_actions must be a non-empty array"
             )
 
-        normalized_actions = []
+        if len(allowed_actions) != 1:
+            raise RuntimeError(
+                f"Approval policy '{name}' currently requires exactly one "
+                "definition.allowed_actions entry because the VCF Automation "
+                "approval Policy API expects one flat approval definition per "
+                "policy"
+            )
 
-        for item in allowed_actions:
-            if not isinstance(item, dict):
-                raise RuntimeError(
-                    f"Approval policy '{name}'.definition."
-                    "allowed_actions entries must be objects"
-                )
+        item = allowed_actions[0]
 
-            actions = item.get("actions") or []
-            approvers = item.get("approvers") or []
+        if not isinstance(item, dict):
+            raise RuntimeError(
+                f"Approval policy '{name}'.definition.allowed_actions[0] "
+                "must be an object"
+            )
 
-            if not isinstance(actions, list) or not actions:
-                raise RuntimeError(
-                    f"Approval policy '{name}' has an "
-                    "allowed_actions entry without actions"
-                )
+        actions = item.get("actions") or []
+        approvers = item.get("approvers") or []
 
-            if not isinstance(approvers, list) or not approvers:
-                raise RuntimeError(
-                    f"Approval policy '{name}' has an "
-                    "allowed_actions entry without approvers"
-                )
+        if not isinstance(actions, list) or not actions:
+            raise RuntimeError(
+                f"Approval policy '{name}' requires actions"
+            )
 
-            normalized_actions.append(
-                {
-                    "actions": actions,
-                    "approvers": approvers,
-                    "approvalMode": str(
-                        item.get("approval_mode", "ANY_OF")
-                        or "ANY_OF"
-                    ).strip().upper(),
-                    "approverType": str(
-                        item.get(
-                            "approval_type",
-                            item.get("approver_type", "ROLE"),
-                        )
-                        or "ROLE"
-                    ).strip().upper(),
-                    "autoApprovalExpiry": int(
-                        item.get(
-                            "auto_approval_expiry_days",
-                            1,
-                        )
-                    ),
-                    "autoApprovalDecision": str(
-                        item.get(
-                            "auto_approval_decision",
-                            "REJECT",
-                        )
-                        or "REJECT"
-                    ).strip().upper(),
-                }
+        if not isinstance(approvers, list) or not approvers:
+            raise RuntimeError(
+                f"Approval policy '{name}' requires approvers"
+            )
+
+        level = int(
+            item.get(
+                "level",
+                raw_definition.get("level", 1),
+            )
+        )
+
+        if level < 1:
+            raise RuntimeError(
+                f"Approval policy '{name}'.level must be >= 1"
             )
 
         return {
-            "allowedActions": normalized_actions,
+            "level": level,
+            "actions": actions,
+            "approvers": approvers,
+            "approvalMode": str(
+                item.get("approval_mode", "ANY_OF")
+                or "ANY_OF"
+            ).strip().upper(),
+            "approverType": str(
+                item.get(
+                    "approval_type",
+                    item.get("approver_type", "ROLE"),
+                )
+                or "ROLE"
+            ).strip().upper(),
+            "autoApprovalExpiry": int(
+                item.get(
+                    "auto_approval_expiry_days",
+                    1,
+                )
+            ),
+            "autoApprovalDecision": str(
+                item.get(
+                    "auto_approval_decision",
+                    "REJECT",
+                )
+                or "REJECT"
+            ).strip().upper(),
         }
 
     if policy_type == "iaas_resource":
@@ -9710,6 +9793,104 @@ def _policy_definition(
         f"Unsupported policy type '{policy_type}'"
     )
 
+
+def _normalize_policy_criteria(
+    cfg: Dict[str, Any],
+    policy_name: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Accept either API-style:
+      criteria.matchExpression
+
+    or JSON-friendly:
+      criteria.match_expression
+
+    and normalize to the VCF Automation Policy API shape.
+    """
+    criteria = cfg.get("criteria")
+
+    # Also allow criteria nested inside definition for convenience.
+    if criteria is None:
+        definition = cfg.get("definition")
+        if isinstance(definition, dict):
+            criteria = definition.get("criteria")
+
+    if criteria in (None, {}):
+        return None
+
+    if not isinstance(criteria, dict):
+        raise RuntimeError(
+            f"Policy '{policy_name}'.criteria must be an object"
+        )
+
+    raw_expressions = (
+        criteria.get("matchExpression")
+        or criteria.get("match_expression")
+        or []
+    )
+
+    if not isinstance(raw_expressions, list):
+        raise RuntimeError(
+            f"Policy '{policy_name}'.criteria.match_expression "
+            "must be an array"
+        )
+
+    expressions = []
+
+    for index, expression in enumerate(raw_expressions):
+        if not isinstance(expression, dict):
+            raise RuntimeError(
+                f"Policy '{policy_name}'.criteria.match_expression"
+                f"[{index}] must be an object"
+            )
+
+        key = str(
+            expression.get("key", "") or ""
+        ).strip()
+        operator = str(
+            expression.get("operator", "") or ""
+        ).strip()
+        value = expression.get("value")
+
+        if not key:
+            raise RuntimeError(
+                f"Policy '{policy_name}'.criteria.match_expression"
+                f"[{index}].key is required"
+            )
+
+        if not operator:
+            raise RuntimeError(
+                f"Policy '{policy_name}'.criteria.match_expression"
+                f"[{index}].operator is required"
+            )
+
+        if "value" not in expression:
+            raise RuntimeError(
+                f"Policy '{policy_name}'.criteria.match_expression"
+                f"[{index}].value is required"
+            )
+
+        expressions.append(
+            {
+                "key": key,
+                "operator": operator,
+                "value": value,
+            }
+        )
+
+    normalized: Dict[str, Any] = {
+        "matchExpression": expressions,
+    }
+
+    # Preserve any additional API-supported criteria fields verbatim.
+    for key, value in criteria.items():
+        if key not in {
+            "matchExpression",
+            "match_expression",
+        }:
+            normalized[key] = value
+
+    return normalized
 
 def _normalize_policy_config(
     client: RestClient,
@@ -9778,14 +9959,10 @@ def _normalize_policy_config(
             project_name,
         )
 
-    criteria = cfg.get("criteria")
-    if criteria is not None and not isinstance(
-        criteria,
-        dict,
-    ):
-        raise RuntimeError(
-            f"Policy '{name}'.criteria must be an object"
-        )
+    criteria = _normalize_policy_criteria(
+        cfg,
+        name,
+    )
 
     desired: Dict[str, Any] = {
         "name": name,
@@ -10186,10 +10363,6 @@ def _supervisor_namespace_payload(
             continue
         seen_zones.add(zone_key)
 
-        # The API requires all four limit/reservation fields, even when the
-        # namespace JSON only selects a zone.  Start from the selected
-        # NamespaceClassConfig zone (or wildcard '*') and then allow explicit
-        # namespace-level overrides.
         defaults = _namespace_class_zone_defaults(
             class_config,
             zone_name,
@@ -10206,15 +10379,33 @@ def _supervisor_namespace_payload(
             "memory_limit": "memoryLimit",
             "memory_reservation": "memoryReservation",
         }
+
         for source_key, target_key in override_map.items():
             if zone_cfg.get(source_key) is not None:
                 zone[target_key] = str(zone_cfg[source_key])
 
+        required_zone_fields = (
+            "cpuLimit",
+            "cpuReservation",
+            "memoryLimit",
+            "memoryReservation",
+        )
+
+        missing_zone_fields = [
+            field
+            for field in required_zone_fields
+            if not str(zone.get(field, "") or "").strip()
+        ]
+
+        if missing_zone_fields:
+            raise RuntimeError(
+                f"Namespace '{name or '<unnamed>'}' zone '{zone_name}' "
+                f"is missing required override fields: "
+                f"{', '.join(missing_zone_fields)}"
+            )
+
         zone_payload.append(zone)
 
-    # Storage classes:
-    # - If the NamespaceClassConfig already defines storageClasses, inherit them.
-    # - Otherwise use namespaces[].storage_classes as namespace-level overrides.
     class_spec = class_config.get("spec") or {}
     if not isinstance(class_spec, dict):
         class_spec = {}
@@ -10229,44 +10420,79 @@ def _supervisor_namespace_payload(
             f"Namespace '{name or '<unnamed>'}'.storage_classes must be an array"
         )
 
-    storage_override: List[Dict[str, Any]] = []
+    def normalize_storage_classes(values: List[Any], source_name: str) -> List[Dict[str, Any]]:
+        result: List[Dict[str, Any]] = []
+        seen = set()
 
-    if not class_storage_classes:
-        seen_storage = set()
-
-        for storage_cfg in namespace_storage_classes:
+        for storage_cfg in values:
             if not isinstance(storage_cfg, dict):
                 raise RuntimeError(
-                    f"Namespace '{name or '<unnamed>'}' storage_classes entries "
-                    "must be objects"
+                    f"{source_name} storage class entries must be objects"
                 )
 
             storage_name = str(storage_cfg.get("name", "") or "").strip()
             if not storage_name:
                 raise RuntimeError(
-                    f"Namespace '{name or '<unnamed>'}' contains a storage class "
-                    "without a name"
+                    f"{source_name} contains a storage class without a name"
                 )
 
             key = storage_name.casefold()
-            if key in seen_storage:
+            if key in seen:
                 continue
-            seen_storage.add(key)
+            seen.add(key)
 
             entry: Dict[str, Any] = {"name": storage_name}
-
             limit = storage_cfg.get("limit")
             if limit is not None and str(limit).strip():
                 entry["limit"] = str(limit).strip()
 
-            storage_override.append(entry)
+            result.append(entry)
 
-        if not storage_override:
-            raise RuntimeError(
-                f"Cannot create namespace '{name or '<unnamed>'}': "
-                f"SupervisorNamespaceClassConfig '{class_name}' has no "
-                "storageClasses and namespaces[].storage_classes is empty"
+        return result
+
+    concrete_class_storage = [
+        storage_cfg
+        for storage_cfg in class_storage_classes
+        if isinstance(storage_cfg, dict)
+        and str(storage_cfg.get("name", "") or "").strip()
+        and str(storage_cfg.get("name", "") or "").strip() != "*"
+    ]
+
+    if concrete_class_storage:
+        effective_storage = normalize_storage_classes(
+            concrete_class_storage,
+            f"SupervisorNamespaceClassConfig '{class_name}'",
+        )
+        info(
+            f"Namespace '{name or '<generated>'}' using "
+            f"{len(effective_storage)} concrete storage class(es) from "
+            f"NamespaceClassConfig '{class_name}'"
+        )
+    else:
+        if class_storage_classes:
+            info(
+                f"NamespaceClassConfig '{class_name}' exposes only wildcard "
+                "storage classes; using namespace-level storage_classes instead"
             )
+
+        effective_storage = normalize_storage_classes(
+            namespace_storage_classes,
+            f"Namespace '{name or '<generated>'}'",
+        )
+
+        if effective_storage:
+            info(
+                f"Namespace '{name or '<generated>'}' using "
+                f"{len(effective_storage)} namespace-level storage "
+                "class override(s)"
+            )
+
+    if not effective_storage:
+        raise RuntimeError(
+            f"Cannot create namespace '{name or '<unnamed>'}': "
+            f"SupervisorNamespaceClassConfig '{class_name}' has no "
+            "storageClasses and namespaces[].storage_classes is empty"
+        )
 
     spec: Dict[str, Any] = {
         "description": str(namespace_cfg.get("description", "") or ""),
@@ -10274,11 +10500,9 @@ def _supervisor_namespace_payload(
         "className": class_name,
         "initialClassConfigOverrides": {
             "zones": zone_payload,
+            "storageClasses": effective_storage,
         },
     }
-
-    if storage_override:
-        spec["initialClassConfigOverrides"]["storageClasses"] = storage_override
 
     vpc_name = str(namespace_cfg.get("vpcName", "") or "").strip()
     if vpc_name:
@@ -10596,10 +10820,31 @@ def configure_organization_namespaces(
         existing = None
 
         if namespace_name:
+            # Concrete name always wins and is matched exactly.
             existing = cci.find_supervisor_namespace(
                 project_name,
                 namespace_name,
             )
+        elif generate_name:
+            # If name is empty, reconcile against the generated Kubernetes
+            # metadata.name using generate_name as a prefix.
+            existing = cci.find_supervisor_namespace_by_generate_name(
+                project_name,
+                generate_name,
+            )
+
+            if existing:
+                existing_meta = existing.get("metadata") or {}
+                actual_name = (
+                    str(existing_meta.get("name", "") or "").strip()
+                    if isinstance(existing_meta, dict)
+                    else ""
+                )
+                info(
+                    f"Supervisor namespace '{actual_name or '<generated>'}' "
+                    f"matched generateName prefix '{generate_name}' in "
+                    f"project '{project_name}'"
+                )
 
         if namespace_name and not existing:
             for candidate_project in organization_projects(client):
@@ -10628,8 +10873,15 @@ def configure_organization_namespaces(
                     break
 
         if existing:
+            existing_meta = existing.get("metadata") or {}
+            actual_name = (
+                str(existing_meta.get("name", "") or "").strip()
+                if isinstance(existing_meta, dict)
+                else ""
+            )
+
             compare_supervisor_namespace(
-                namespace_name,
+                namespace_name or actual_name or generate_name,
                 namespace_cfg,
                 existing,
             )
