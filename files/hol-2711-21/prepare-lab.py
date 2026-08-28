@@ -16,6 +16,7 @@ import xml.etree.ElementTree as ET
 
 import requests
 import urllib3
+import mimetypes
 try:
     import yaml
 except ImportError:
@@ -9414,6 +9415,590 @@ def configure_organization_projects(
             project_cfg,
         )
 
+
+# ============================================================
+# Organization Blueprints / Catalog
+# ============================================================
+
+def _blueprint_values(payload: Any) -> List[Dict[str, Any]]:
+    if isinstance(payload, list):
+        return [x for x in payload if isinstance(x, dict)]
+
+    if not isinstance(payload, dict):
+        return []
+
+    for key in ("content", "values", "items", "blueprints"):
+        values = payload.get(key)
+        if isinstance(values, list):
+            return [x for x in values if isinstance(x, dict)]
+
+    return []
+
+
+def organization_blueprints(
+    client: RestClient,
+) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+    skip_count = 0
+    top = 200
+
+    while True:
+        payload = client.get(
+            f"/blueprint/api/blueprints?$top={top}&$skip={skip_count}"
+        )
+
+        values = _blueprint_values(payload)
+        result.extend(values)
+
+        if len(values) < top:
+            break
+
+        skip_count += len(values)
+
+    return result
+
+
+def _blueprint_by_name(
+    client: RestClient,
+    name: str,
+) -> Optional[Dict[str, Any]]:
+    wanted = str(name or "").strip().casefold()
+
+    for blueprint in organization_blueprints(client):
+        if (
+            str(blueprint.get("name", "") or "")
+            .strip()
+            .casefold()
+            == wanted
+        ):
+            return blueprint
+
+    return None
+
+
+def _blueprint_versions(
+    client: RestClient,
+    blueprint_id: str,
+) -> List[Dict[str, Any]]:
+    encoded_id = urllib.parse.quote(
+        str(blueprint_id),
+        safe="",
+    )
+
+    payload = client.get(
+        f"/blueprint/api/blueprints/{encoded_id}/versions"
+    )
+
+    return _blueprint_values(payload)
+
+
+def _blueprint_version(
+    client: RestClient,
+    blueprint_id: str,
+    version: str,
+) -> Optional[Dict[str, Any]]:
+    wanted = str(version or "").strip().casefold()
+
+    for item in _blueprint_versions(
+        client,
+        blueprint_id,
+    ):
+        if (
+            str(item.get("version", "") or "")
+            .strip()
+            .casefold()
+            == wanted
+        ):
+            return item
+
+    return None
+
+
+def _upload_icon_file(
+    client: RestClient,
+    icon_path: Path,
+) -> str:
+    if not icon_path.exists():
+        raise RuntimeError(
+            f"Blueprint icon file not found: {icon_path}"
+        )
+
+    mime_type, _ = mimetypes.guess_type(str(icon_path))
+
+    # Explicit mappings for common icon formats.  Some Linux mimetypes
+    # databases do not know SVG/WebP reliably.
+    extension = icon_path.suffix.strip().casefold()
+
+    explicit_mime_types = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".svg": "image/svg+xml",
+        ".webp": "image/webp",
+        ".ico": "image/x-icon",
+        ".bmp": "image/bmp",
+    }
+
+    mime_type = explicit_mime_types.get(
+        extension,
+        mime_type,
+    )
+
+    if not mime_type or not mime_type.startswith("image/"):
+        raise RuntimeError(
+            f"Blueprint icon '{icon_path}' does not have a recognised "
+            "image MIME type. Supported examples: PNG, JPEG, GIF, SVG, "
+            "WebP, ICO and BMP."
+        )
+
+    info(
+        f"Uploading blueprint icon '{icon_path}' "
+        f"with MIME type '{mime_type}'"
+    )
+
+    with icon_path.open("rb") as handle:
+        response = client.session.post(
+            client.url("/icon/api/icons"),
+            files={
+                "file": (
+                    icon_path.name,
+                    handle,
+                    mime_type,
+                )
+            },
+            timeout=120,
+        )
+
+    if not response.ok:
+        try:
+            detail = response.json()
+            formatted = json.dumps(detail, indent=2)
+        except Exception:
+            formatted = response.text
+
+        raise RuntimeError(
+            f"POST {client.url('/icon/api/icons')} failed: "
+            f"HTTP {response.status_code}\n{formatted}"
+        )
+
+    icon_id = ""
+
+    try:
+        payload = response.json()
+    except Exception:
+        payload = None
+
+    if isinstance(payload, dict):
+        icon_id = str(
+            payload.get("id")
+            or payload.get("iconId")
+            or payload.get("icon_id")
+            or ""
+        ).strip()
+    elif isinstance(payload, str):
+        icon_id = payload.strip().strip('"')
+
+    if not icon_id:
+        location = str(
+            response.headers.get("Location", "") or ""
+        ).strip()
+
+        if location:
+            icon_id = urllib.parse.unquote(
+                location.rstrip("/").rsplit("/", 1)[-1]
+            ).strip()
+
+    if not icon_id:
+        text_value = str(response.text or "").strip().strip('"')
+        if text_value and len(text_value) < 256:
+            icon_id = text_value
+
+    if not icon_id:
+        raise RuntimeError(
+            "VCF Automation accepted the icon upload but did not expose "
+            "the created icon ID in the response body or Location header"
+        )
+
+    info(
+        f"Uploaded blueprint icon '{icon_path.name}' -> {icon_id}"
+    )
+
+    return icon_id
+
+
+def _normalize_blueprint_content(value: Any) -> str:
+    return str(value or "").replace("\r\n", "\n").strip()
+
+
+def configure_organization_blueprint(
+    client: RestClient,
+    org_name: str,
+    cfg: Dict[str, Any],
+    config_dir: Path,
+) -> None:
+    if not isinstance(cfg, dict):
+        raise RuntimeError(
+            f"Each blueprint in organization '{org_name}' must be an object"
+        )
+
+    name = str(cfg.get("name", "") or "").strip()
+    if not name:
+        raise RuntimeError(
+            f"Each blueprint in organization '{org_name}' requires 'name'"
+        )
+
+    yaml_file = str(
+        cfg.get("yaml_file")
+        or cfg.get("content_file")
+        or cfg.get("file")
+        or ""
+    ).strip()
+
+    if not yaml_file:
+        raise RuntimeError(
+            f"Blueprint '{name}' requires yaml_file"
+        )
+
+    yaml_path = resolve_path(
+        yaml_file,
+        config_dir,
+    )
+
+    if not yaml_path.exists():
+        raise RuntimeError(
+            f"Blueprint '{name}' YAML file not found: {yaml_path}"
+        )
+
+    yaml_content = yaml_path.read_text(
+        encoding="utf-8"
+    )
+
+    if not yaml_content.strip():
+        raise RuntimeError(
+            f"Blueprint '{name}' YAML file is empty: {yaml_path}"
+        )
+
+    project_name = str(
+        cfg.get("project_name", "") or ""
+    ).strip()
+
+    project_id = ""
+    if project_name:
+        project = _project_by_name(
+            client,
+            project_name,
+        )
+
+        if not project:
+            raise RuntimeError(
+                f"Blueprint '{name}' project '{project_name}' was not found"
+            )
+
+        project_id = str(
+            project.get("id", "") or ""
+        ).strip()
+
+        if project_id.startswith("urn:"):
+            project_id = project_id.rsplit(":", 1)[-1]
+
+        if not project_id:
+            raise RuntimeError(
+                f"Blueprint '{name}' project '{project_name}' has no ID"
+            )
+
+    request_scope_org = bool(
+        cfg.get("request_scope_org", False)
+    )
+
+    existing = _blueprint_by_name(
+        client,
+        name,
+    )
+
+    icon_id = ""
+    icon_file = str(
+        cfg.get("icon_file", "") or ""
+    ).strip()
+
+    replace_icon = bool(
+        cfg.get("replace_icon", False)
+    )
+
+    if existing:
+        icon_id = str(
+            existing.get("iconId", "") or ""
+        ).strip()
+
+    if icon_file and (
+        not icon_id
+        or replace_icon
+        or not existing
+    ):
+        icon_id = _upload_icon_file(
+            client,
+            resolve_path(
+                icon_file,
+                config_dir,
+            ),
+        )
+
+    desired_body: Dict[str, Any] = {
+        "name": name,
+        "description": str(
+            cfg.get("description", "") or ""
+        ),
+        "content": yaml_content,
+        "requestScopeOrg": request_scope_org,
+    }
+
+    if project_id:
+        desired_body["projectId"] = project_id
+        desired_body["projectName"] = project_name
+
+    if icon_id:
+        desired_body["iconId"] = icon_id
+
+    if existing:
+        blueprint_id = str(
+            existing.get("id", "") or ""
+        ).strip()
+
+        if not blueprint_id:
+            raise RuntimeError(
+                f"Existing blueprint '{name}' has no ID"
+            )
+
+        current_compare = {
+            "name": str(existing.get("name", "") or "").strip(),
+            "description": str(
+                existing.get("description", "") or ""
+            ),
+            "content": _normalize_blueprint_content(
+                existing.get("content")
+            ),
+            "projectId": str(
+                existing.get("projectId", "") or ""
+            ).strip(),
+            "requestScopeOrg": bool(
+                existing.get("requestScopeOrg", False)
+            ),
+            "iconId": str(
+                existing.get("iconId", "") or ""
+            ).strip(),
+        }
+
+        desired_compare = {
+            "name": name,
+            "description": desired_body["description"],
+            "content": _normalize_blueprint_content(
+                yaml_content
+            ),
+            "projectId": project_id,
+            "requestScopeOrg": request_scope_org,
+            "iconId": icon_id,
+        }
+
+        if current_compare != desired_compare:
+            update(f"Blueprint '{name}'")
+            encoded_id = urllib.parse.quote(
+                blueprint_id,
+                safe="",
+            )
+            client.put(
+                f"/blueprint/api/blueprints/{encoded_id}",
+                json={
+                    **desired_body,
+                    "id": blueprint_id,
+                },
+            )
+        else:
+            skip(f"Blueprint '{name}' draft already matches YAML/configuration")
+    else:
+        create(f"Blueprint '{name}' from '{yaml_path.name}'")
+        created = client.post(
+            "/blueprint/api/blueprints",
+            json=desired_body,
+        )
+
+        if not isinstance(created, dict):
+            raise RuntimeError(
+                f"Blueprint '{name}' create did not return a blueprint object"
+            )
+
+        blueprint_id = str(
+            created.get("id", "") or ""
+        ).strip()
+
+        if not blueprint_id:
+            raise RuntimeError(
+                f"Blueprint '{name}' create response did not contain an ID"
+            )
+
+        existing = created
+
+    publish = bool(
+        cfg.get("publish", True)
+    )
+
+    version = str(
+        cfg.get("version", "1.0") or "1.0"
+    ).strip()
+
+    if not version:
+        raise RuntimeError(
+            f"Blueprint '{name}' version cannot be empty"
+        )
+
+    existing_version = _blueprint_version(
+        client,
+        blueprint_id,
+        version,
+    )
+
+    if existing_version:
+        version_content = _normalize_blueprint_content(
+            existing_version.get("content")
+        )
+        desired_content = _normalize_blueprint_content(
+            yaml_content
+        )
+
+        if version_content and version_content != desired_content:
+            raise RuntimeError(
+                f"Blueprint '{name}' version '{version}' already exists "
+                "with different YAML content. Increment the configured "
+                "blueprint version before publishing the changed YAML."
+            )
+
+        version_status = str(
+            existing_version.get("status", "") or ""
+        ).strip().upper()
+
+        if publish and version_status != "RELEASED":
+            encoded_id = urllib.parse.quote(
+                blueprint_id,
+                safe="",
+            )
+            encoded_version = urllib.parse.quote(
+                version,
+                safe="",
+            )
+
+            create(
+                f"Release blueprint '{name}' version '{version}' to catalog"
+            )
+
+            client.post(
+                f"/blueprint/api/blueprints/{encoded_id}"
+                f"/versions/{encoded_version}/actions/release"
+            )
+        elif publish:
+            skip(
+                f"Blueprint '{name}' version '{version}' is already "
+                "released to catalog"
+            )
+        else:
+            skip(
+                f"Blueprint '{name}' version '{version}' already exists"
+            )
+
+        return
+
+    encoded_id = urllib.parse.quote(
+        blueprint_id,
+        safe="",
+    )
+
+    version_body = {
+        "version": version,
+        "description": str(
+            cfg.get("version_description", "") or ""
+        ),
+        "changeLog": str(
+            cfg.get("change_log", "") or ""
+        ),
+        "sourceControlPush": False,
+        "release": False,
+    }
+
+    create(
+        f"Blueprint '{name}' version '{version}'"
+    )
+
+    client.post(
+        f"/blueprint/api/blueprints/{encoded_id}/versions",
+        json=version_body,
+    )
+
+    if publish:
+        encoded_version = urllib.parse.quote(
+            version,
+            safe="",
+        )
+
+        create(
+            f"Release blueprint '{name}' version '{version}' to catalog"
+        )
+
+        client.post(
+            f"/blueprint/api/blueprints/{encoded_id}"
+            f"/versions/{encoded_version}/actions/release"
+        )
+
+        info(
+            f"Blueprint '{name}' version '{version}' published to catalog"
+        )
+
+
+def configure_organization_blueprints(
+    client: RestClient,
+    org_name: str,
+    blueprints_cfg: Any,
+    config_dir: Path,
+) -> None:
+    if blueprints_cfg in (None, [], {}):
+        return
+
+    if not isinstance(blueprints_cfg, list):
+        raise RuntimeError(
+            f"vcfa.organizations['{org_name}'].blueprints must be an array"
+        )
+
+    seen = set()
+
+    for cfg in blueprints_cfg:
+        if not isinstance(cfg, dict):
+            raise RuntimeError(
+                f"Each blueprint in organization '{org_name}' must be an object"
+            )
+
+        name = str(
+            cfg.get("name", "") or ""
+        ).strip()
+
+        if not name:
+            raise RuntimeError(
+                f"Each blueprint in organization '{org_name}' requires name"
+            )
+
+        key = name.casefold()
+        if key in seen:
+            raise RuntimeError(
+                f"Blueprint '{name}' is configured more than once "
+                f"in organization '{org_name}'"
+            )
+
+        seen.add(key)
+
+        configure_organization_blueprint(
+            client,
+            org_name,
+            cfg,
+            config_dir,
+        )
+
+
 # ============================================================
 # Organization policies
 # ============================================================
@@ -10332,6 +10917,7 @@ def configure_organization_policies(
             client,
             org_name,
             cfg,
+            config_dir,
         )
 
 
@@ -11782,10 +12368,14 @@ def main():
                     namespaces_cfg,
                 )
 
-            if org_cfg.get("blueprints"):
-                warn(
-                    f"blueprints configured for '{name}' but blueprint "
-                    "processing is not implemented yet"
+            blueprints_cfg = org_cfg.get("blueprints") or []
+            if blueprints_cfg:
+                print(f"\n--- Blueprints: {name} ---")
+                configure_organization_blueprints(
+                    org_client,
+                    name,
+                    blueprints_cfg,
+                    config_dir,
                 )
 
             if org_cfg.get("catalog_items"):
