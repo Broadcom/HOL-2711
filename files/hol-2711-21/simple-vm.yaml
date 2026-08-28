@@ -10,6 +10,10 @@ inputs:
     type: string
     title: VM Class / Size
     $data: /data/virtualmachineclasses?namespace={{namespace}}
+  storage_class:
+    type: string
+    title: Storage class
+    $data: /data/storageclasses?namespace={{namespace}}
 outputs:
   sshCommand:
     value: ssh holuser@${resource.LoadBalancer.object.status.loadBalancer.ingress[0].ip}
@@ -54,7 +58,7 @@ resources:
           className: ${input.vm_class}
           imageName: ubuntu-24-04-gold-ovf
           powerState: PoweredOn
-          storageClass: vsan-default-storage-policy
+          storageClass: ${input.storage_class}
       wait:
         conditions:
           - type: VirtualMachineCreated

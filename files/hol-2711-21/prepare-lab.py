@@ -16,6 +16,11 @@ import xml.etree.ElementTree as ET
 
 import requests
 import urllib3
+import mimetypes
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 try:
     from pyVim.connect import SmartConnect, Disconnect
@@ -352,6 +357,77 @@ class CciClient:
                 return item
 
         return None
+
+
+    def find_supervisor_namespace_by_generate_name(
+        self,
+        project: str,
+        generate_name: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Find an already-generated SupervisorNamespace from the configured
+        Kubernetes generateName prefix.
+
+        Used only when JSON `name` is empty. Exact `name` lookup remains the
+        preferred reconciliation key whenever a concrete name is configured.
+        """
+        prefix = str(generate_name or "").strip().casefold()
+        if not prefix:
+            return None
+
+        matches: List[Dict[str, Any]] = []
+
+        for item in self.list_supervisor_namespaces(project):
+            meta = item.get("metadata") or {}
+            if not isinstance(meta, dict):
+                continue
+
+            actual_name = str(
+                meta.get("name", "") or ""
+            ).strip()
+
+            if actual_name.casefold().startswith(prefix):
+                matches.append(item)
+
+        if not matches:
+            return None
+
+        def sort_key(item: Dict[str, Any]):
+            meta = item.get("metadata") or {}
+            if not isinstance(meta, dict):
+                meta = {}
+
+            created = str(
+                meta.get("creationTimestamp", "") or ""
+            ).strip()
+
+            actual_name = str(
+                meta.get("name", "") or ""
+            ).strip().casefold()
+
+            return (created, actual_name)
+
+        matches.sort(key=sort_key)
+
+        if len(matches) > 1:
+            names = []
+            for item in matches:
+                meta = item.get("metadata") or {}
+                if isinstance(meta, dict):
+                    candidate_name = str(
+                        meta.get("name", "") or ""
+                    ).strip()
+                    if candidate_name:
+                        names.append(candidate_name)
+
+            warn(
+                f"Found {len(matches)} Supervisor namespaces in project "
+                f"'{project}' matching generateName prefix '{generate_name}': "
+                f"{names}. Using '{names[0] if names else '<first match>'}' "
+                "and not creating another namespace."
+            )
+
+        return matches[0]
 
     def create_supervisor_namespace(self, project: str, payload: Dict[str, Any]):
         return self.rest.post(
@@ -3943,10 +4019,93 @@ def provider_organizations(client: RestClient):
     return client.paged("/cloudapi/1.0.0/orgs")
 
 
-def provider_organization(client: RestClient, name: str):
+def provider_organization(
+    client: RestClient,
+    name: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Resolve a provider organization robustly.
+
+    VCFA can reject creation with DUPLICATE_NAME even when an immediately
+    preceding unfiltered list call failed to surface the org. Try a direct
+    server-side name filter first, then fall back to a case-insensitive scan
+    of the full collection.
+    """
+    wanted = str(name or "").strip()
+    if not wanted:
+        return None
+
+    wanted_cf = wanted.casefold()
+
+    def _extract_values(payload: Any) -> List[Dict[str, Any]]:
+        if isinstance(payload, list):
+            return [
+                item for item in payload
+                if isinstance(item, dict)
+            ]
+
+        if not isinstance(payload, dict):
+            return []
+
+        for key in (
+            "values",
+            "items",
+            "orgs",
+            "organizations",
+        ):
+            values = payload.get(key)
+            if isinstance(values, list):
+                return [
+                    item for item in values
+                    if isinstance(item, dict)
+                ]
+
+        # Some endpoints may return one object directly.
+        if payload.get("name") or payload.get("id"):
+            return [payload]
+
+        return []
+
+    # Prefer a filtered lookup. Different VCFA builds have accepted slightly
+    # different filter encodings, so try the common CloudAPI forms.
+    filter_values = (
+        f"name=={wanted}",
+        f"(name=={wanted})",
+        f'name=="{wanted}"',
+    )
+
+    for filter_value in filter_values:
+        encoded = urllib.parse.quote(
+            filter_value,
+            safe="=()\"",
+        )
+
+        try:
+            payload = client.get(
+                f"/cloudapi/1.0.0/orgs"
+                f"?filter={encoded}&page=1&pageSize=128",
+                max_attempts=1,
+            )
+        except RuntimeError:
+            continue
+
+        for org in _extract_values(payload):
+            org_name = str(
+                org.get("name", "") or ""
+            ).strip()
+
+            if org_name.casefold() == wanted_cf:
+                return org
+
+    # Fall back to the complete paged collection.
     for org in provider_organizations(client):
-        if org.get("name") == name:
+        org_name = str(
+            org.get("name", "") or ""
+        ).strip()
+
+        if org_name.casefold() == wanted_cf:
             return org
+
     return None
 
 
@@ -3956,18 +4115,23 @@ def create_provider_organization_if_missing(
     timeout: int = 120,
     poll: int = 2,
 ):
-    name = str(cfg["name"])
+    name = str(cfg["name"]).strip()
 
     existing = provider_organization(client, name)
     if existing:
-        skip(f"VCFA organization '{name}' already exists")
+        skip(
+            f"VCFA organization '{name}' already exists "
+            f"[{object_id(existing) or 'no-id'}]"
+        )
         return existing
 
     body = {
         "name": name,
         "displayName": cfg.get("display_name", name),
         "description": cfg.get("description", ""),
-        "isClassicTenant": bool(cfg.get("is_classic_tenant", False)),
+        "isClassicTenant": bool(
+            cfg.get("is_classic_tenant", False)
+        ),
         "isProviderConsumptionOrg": bool(
             cfg.get("is_provider_consumption_org", False)
         ),
@@ -3976,24 +4140,71 @@ def create_provider_organization_if_missing(
 
     create(f"VCFA organization '{name}'")
 
-    created = client.post(
-        "/cloudapi/1.0.0/orgs",
-        json=body,
-    )
+    try:
+        created = client.post(
+            "/cloudapi/1.0.0/orgs",
+            json=body,
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+
+        if (
+            "DUPLICATE_NAME" not in message
+            and "already exists" not in message.casefold()
+        ):
+            raise
+
+        warn(
+            f"VCFA reported organization '{name}' already exists; "
+            "re-resolving the existing organization"
+        )
+
+        deadline = time.time() + max(5, timeout)
+
+        while time.time() < deadline:
+            existing = provider_organization(
+                client,
+                name,
+            )
+
+            if existing:
+                skip(
+                    f"VCFA organization '{name}' already exists "
+                    f"[{object_id(existing) or 'no-id'}]"
+                )
+                return existing
+
+            time.sleep(max(1, poll))
+
+        raise RuntimeError(
+            f"VCFA reported DUPLICATE_NAME for organization '{name}', "
+            f"but the existing organization could not be resolved through "
+            f"/cloudapi/1.0.0/orgs within {timeout} seconds. This usually "
+            "indicates a stale/partially deleted Tenant Manager record or "
+            "an organization not visible to the current provider session."
+        ) from exc
 
     # Some VCFA builds return the created Org body; others return
     # an empty/async response. Re-query by name before continuing.
     if isinstance(created, dict):
         created_id = object_id(created)
-        created_name = str(created.get("name", "") or "")
+        created_name = str(
+            created.get("name", "") or ""
+        ).strip()
 
-        if created_id and created_name == name:
+        if (
+            created_id
+            and created_name.casefold() == name.casefold()
+        ):
             return created
 
     deadline = time.time() + timeout
 
     while time.time() < deadline:
-        current = provider_organization(client, name)
+        current = provider_organization(
+            client,
+            name,
+        )
 
         if current:
             info(
@@ -9204,7 +9415,1514 @@ def configure_organization_projects(
             project_cfg,
         )
 
+
 # ============================================================
+# Organization Blueprints / Catalog
+# ============================================================
+
+def _blueprint_values(payload: Any) -> List[Dict[str, Any]]:
+    if isinstance(payload, list):
+        return [x for x in payload if isinstance(x, dict)]
+
+    if not isinstance(payload, dict):
+        return []
+
+    for key in ("content", "values", "items", "blueprints"):
+        values = payload.get(key)
+        if isinstance(values, list):
+            return [x for x in values if isinstance(x, dict)]
+
+    return []
+
+
+def organization_blueprints(
+    client: RestClient,
+) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+    skip_count = 0
+    top = 200
+
+    while True:
+        payload = client.get(
+            f"/blueprint/api/blueprints?$top={top}&$skip={skip_count}"
+        )
+
+        values = _blueprint_values(payload)
+        result.extend(values)
+
+        if len(values) < top:
+            break
+
+        skip_count += len(values)
+
+    return result
+
+
+def _blueprint_by_name(
+    client: RestClient,
+    name: str,
+) -> Optional[Dict[str, Any]]:
+    wanted = str(name or "").strip().casefold()
+
+    for blueprint in organization_blueprints(client):
+        if (
+            str(blueprint.get("name", "") or "")
+            .strip()
+            .casefold()
+            == wanted
+        ):
+            return blueprint
+
+    return None
+
+
+def _blueprint_versions(
+    client: RestClient,
+    blueprint_id: str,
+) -> List[Dict[str, Any]]:
+    encoded_id = urllib.parse.quote(
+        str(blueprint_id),
+        safe="",
+    )
+
+    payload = client.get(
+        f"/blueprint/api/blueprints/{encoded_id}/versions"
+    )
+
+    return _blueprint_values(payload)
+
+
+def _blueprint_version(
+    client: RestClient,
+    blueprint_id: str,
+    version: str,
+) -> Optional[Dict[str, Any]]:
+    wanted = str(version or "").strip().casefold()
+
+    for item in _blueprint_versions(
+        client,
+        blueprint_id,
+    ):
+        if (
+            str(item.get("version", "") or "")
+            .strip()
+            .casefold()
+            == wanted
+        ):
+            return item
+
+    return None
+
+
+def _upload_icon_file(
+    client: RestClient,
+    icon_path: Path,
+) -> str:
+    if not icon_path.exists():
+        raise RuntimeError(
+            f"Blueprint icon file not found: {icon_path}"
+        )
+
+    mime_type, _ = mimetypes.guess_type(str(icon_path))
+
+    # Explicit mappings for common icon formats.  Some Linux mimetypes
+    # databases do not know SVG/WebP reliably.
+    extension = icon_path.suffix.strip().casefold()
+
+    explicit_mime_types = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".svg": "image/svg+xml",
+        ".webp": "image/webp",
+        ".ico": "image/x-icon",
+        ".bmp": "image/bmp",
+    }
+
+    mime_type = explicit_mime_types.get(
+        extension,
+        mime_type,
+    )
+
+    if not mime_type or not mime_type.startswith("image/"):
+        raise RuntimeError(
+            f"Blueprint icon '{icon_path}' does not have a recognised "
+            "image MIME type. Supported examples: PNG, JPEG, GIF, SVG, "
+            "WebP, ICO and BMP."
+        )
+
+    info(
+        f"Uploading blueprint icon '{icon_path}' "
+        f"with MIME type '{mime_type}'"
+    )
+
+    with icon_path.open("rb") as handle:
+        response = client.session.post(
+            client.url("/icon/api/icons"),
+            files={
+                "file": (
+                    icon_path.name,
+                    handle,
+                    mime_type,
+                )
+            },
+            timeout=120,
+        )
+
+    if not response.ok:
+        try:
+            detail = response.json()
+            formatted = json.dumps(detail, indent=2)
+        except Exception:
+            formatted = response.text
+
+        raise RuntimeError(
+            f"POST {client.url('/icon/api/icons')} failed: "
+            f"HTTP {response.status_code}\n{formatted}"
+        )
+
+    icon_id = ""
+
+    try:
+        payload = response.json()
+    except Exception:
+        payload = None
+
+    if isinstance(payload, dict):
+        icon_id = str(
+            payload.get("id")
+            or payload.get("iconId")
+            or payload.get("icon_id")
+            or ""
+        ).strip()
+    elif isinstance(payload, str):
+        icon_id = payload.strip().strip('"')
+
+    if not icon_id:
+        location = str(
+            response.headers.get("Location", "") or ""
+        ).strip()
+
+        if location:
+            icon_id = urllib.parse.unquote(
+                location.rstrip("/").rsplit("/", 1)[-1]
+            ).strip()
+
+    if not icon_id:
+        text_value = str(response.text or "").strip().strip('"')
+        if text_value and len(text_value) < 256:
+            icon_id = text_value
+
+    if not icon_id:
+        raise RuntimeError(
+            "VCF Automation accepted the icon upload but did not expose "
+            "the created icon ID in the response body or Location header"
+        )
+
+    info(
+        f"Uploaded blueprint icon '{icon_path.name}' -> {icon_id}"
+    )
+
+    return icon_id
+
+
+def _normalize_blueprint_content(value: Any) -> str:
+    return str(value or "").replace("\r\n", "\n").strip()
+
+
+def configure_organization_blueprint(
+    client: RestClient,
+    org_name: str,
+    cfg: Dict[str, Any],
+    config_dir: Path,
+) -> None:
+    if not isinstance(cfg, dict):
+        raise RuntimeError(
+            f"Each blueprint in organization '{org_name}' must be an object"
+        )
+
+    name = str(cfg.get("name", "") or "").strip()
+    if not name:
+        raise RuntimeError(
+            f"Each blueprint in organization '{org_name}' requires 'name'"
+        )
+
+    yaml_file = str(
+        cfg.get("yaml_file")
+        or cfg.get("content_file")
+        or cfg.get("file")
+        or ""
+    ).strip()
+
+    if not yaml_file:
+        raise RuntimeError(
+            f"Blueprint '{name}' requires yaml_file"
+        )
+
+    yaml_path = resolve_path(
+        yaml_file,
+        config_dir,
+    )
+
+    if not yaml_path.exists():
+        raise RuntimeError(
+            f"Blueprint '{name}' YAML file not found: {yaml_path}"
+        )
+
+    yaml_content = yaml_path.read_text(
+        encoding="utf-8"
+    )
+
+    if not yaml_content.strip():
+        raise RuntimeError(
+            f"Blueprint '{name}' YAML file is empty: {yaml_path}"
+        )
+
+    project_name = str(
+        cfg.get("project_name", "") or ""
+    ).strip()
+
+    project_id = ""
+    if project_name:
+        project = _project_by_name(
+            client,
+            project_name,
+        )
+
+        if not project:
+            raise RuntimeError(
+                f"Blueprint '{name}' project '{project_name}' was not found"
+            )
+
+        project_id = str(
+            project.get("id", "") or ""
+        ).strip()
+
+        if project_id.startswith("urn:"):
+            project_id = project_id.rsplit(":", 1)[-1]
+
+        if not project_id:
+            raise RuntimeError(
+                f"Blueprint '{name}' project '{project_name}' has no ID"
+            )
+
+    request_scope_org = bool(
+        cfg.get("request_scope_org", False)
+    )
+
+    existing = _blueprint_by_name(
+        client,
+        name,
+    )
+
+    icon_id = ""
+    icon_file = str(
+        cfg.get("icon_file", "") or ""
+    ).strip()
+
+    replace_icon = bool(
+        cfg.get("replace_icon", False)
+    )
+
+    if existing:
+        icon_id = str(
+            existing.get("iconId", "") or ""
+        ).strip()
+
+    if icon_file and (
+        not icon_id
+        or replace_icon
+        or not existing
+    ):
+        icon_id = _upload_icon_file(
+            client,
+            resolve_path(
+                icon_file,
+                config_dir,
+            ),
+        )
+
+    desired_body: Dict[str, Any] = {
+        "name": name,
+        "description": str(
+            cfg.get("description", "") or ""
+        ),
+        "content": yaml_content,
+        "requestScopeOrg": request_scope_org,
+    }
+
+    if project_id:
+        desired_body["projectId"] = project_id
+        desired_body["projectName"] = project_name
+
+    if icon_id:
+        desired_body["iconId"] = icon_id
+
+    if existing:
+        blueprint_id = str(
+            existing.get("id", "") or ""
+        ).strip()
+
+        if not blueprint_id:
+            raise RuntimeError(
+                f"Existing blueprint '{name}' has no ID"
+            )
+
+        current_compare = {
+            "name": str(existing.get("name", "") or "").strip(),
+            "description": str(
+                existing.get("description", "") or ""
+            ),
+            "content": _normalize_blueprint_content(
+                existing.get("content")
+            ),
+            "projectId": str(
+                existing.get("projectId", "") or ""
+            ).strip(),
+            "requestScopeOrg": bool(
+                existing.get("requestScopeOrg", False)
+            ),
+            "iconId": str(
+                existing.get("iconId", "") or ""
+            ).strip(),
+        }
+
+        desired_compare = {
+            "name": name,
+            "description": desired_body["description"],
+            "content": _normalize_blueprint_content(
+                yaml_content
+            ),
+            "projectId": project_id,
+            "requestScopeOrg": request_scope_org,
+            "iconId": icon_id,
+        }
+
+        if current_compare != desired_compare:
+            update(f"Blueprint '{name}'")
+            encoded_id = urllib.parse.quote(
+                blueprint_id,
+                safe="",
+            )
+            client.put(
+                f"/blueprint/api/blueprints/{encoded_id}",
+                json={
+                    **desired_body,
+                    "id": blueprint_id,
+                },
+            )
+        else:
+            skip(f"Blueprint '{name}' draft already matches YAML/configuration")
+    else:
+        create(f"Blueprint '{name}' from '{yaml_path.name}'")
+        created = client.post(
+            "/blueprint/api/blueprints",
+            json=desired_body,
+        )
+
+        if not isinstance(created, dict):
+            raise RuntimeError(
+                f"Blueprint '{name}' create did not return a blueprint object"
+            )
+
+        blueprint_id = str(
+            created.get("id", "") or ""
+        ).strip()
+
+        if not blueprint_id:
+            raise RuntimeError(
+                f"Blueprint '{name}' create response did not contain an ID"
+            )
+
+        existing = created
+
+    publish = bool(
+        cfg.get("publish", True)
+    )
+
+    version = str(
+        cfg.get("version", "1.0") or "1.0"
+    ).strip()
+
+    if not version:
+        raise RuntimeError(
+            f"Blueprint '{name}' version cannot be empty"
+        )
+
+    existing_version = _blueprint_version(
+        client,
+        blueprint_id,
+        version,
+    )
+
+    if existing_version:
+        version_content = _normalize_blueprint_content(
+            existing_version.get("content")
+        )
+        desired_content = _normalize_blueprint_content(
+            yaml_content
+        )
+
+        if version_content and version_content != desired_content:
+            raise RuntimeError(
+                f"Blueprint '{name}' version '{version}' already exists "
+                "with different YAML content. Increment the configured "
+                "blueprint version before publishing the changed YAML."
+            )
+
+        version_status = str(
+            existing_version.get("status", "") or ""
+        ).strip().upper()
+
+        if publish and version_status != "RELEASED":
+            encoded_id = urllib.parse.quote(
+                blueprint_id,
+                safe="",
+            )
+            encoded_version = urllib.parse.quote(
+                version,
+                safe="",
+            )
+
+            create(
+                f"Release blueprint '{name}' version '{version}' to catalog"
+            )
+
+            client.post(
+                f"/blueprint/api/blueprints/{encoded_id}"
+                f"/versions/{encoded_version}/actions/release"
+            )
+        elif publish:
+            skip(
+                f"Blueprint '{name}' version '{version}' is already "
+                "released to catalog"
+            )
+        else:
+            skip(
+                f"Blueprint '{name}' version '{version}' already exists"
+            )
+
+        return
+
+    encoded_id = urllib.parse.quote(
+        blueprint_id,
+        safe="",
+    )
+
+    version_body = {
+        "version": version,
+        "description": str(
+            cfg.get("version_description", "") or ""
+        ),
+        "changeLog": str(
+            cfg.get("change_log", "") or ""
+        ),
+        "sourceControlPush": False,
+        "release": False,
+    }
+
+    create(
+        f"Blueprint '{name}' version '{version}'"
+    )
+
+    client.post(
+        f"/blueprint/api/blueprints/{encoded_id}/versions",
+        json=version_body,
+    )
+
+    if publish:
+        encoded_version = urllib.parse.quote(
+            version,
+            safe="",
+        )
+
+        create(
+            f"Release blueprint '{name}' version '{version}' to catalog"
+        )
+
+        client.post(
+            f"/blueprint/api/blueprints/{encoded_id}"
+            f"/versions/{encoded_version}/actions/release"
+        )
+
+        info(
+            f"Blueprint '{name}' version '{version}' published to catalog"
+        )
+
+
+def configure_organization_blueprints(
+    client: RestClient,
+    org_name: str,
+    blueprints_cfg: Any,
+    config_dir: Path,
+) -> None:
+    if blueprints_cfg in (None, [], {}):
+        return
+
+    if not isinstance(blueprints_cfg, list):
+        raise RuntimeError(
+            f"vcfa.organizations['{org_name}'].blueprints must be an array"
+        )
+
+    seen = set()
+
+    for cfg in blueprints_cfg:
+        if not isinstance(cfg, dict):
+            raise RuntimeError(
+                f"Each blueprint in organization '{org_name}' must be an object"
+            )
+
+        name = str(
+            cfg.get("name", "") or ""
+        ).strip()
+
+        if not name:
+            raise RuntimeError(
+                f"Each blueprint in organization '{org_name}' requires name"
+            )
+
+        key = name.casefold()
+        if key in seen:
+            raise RuntimeError(
+                f"Blueprint '{name}' is configured more than once "
+                f"in organization '{org_name}'"
+            )
+
+        seen.add(key)
+
+        configure_organization_blueprint(
+            client,
+            org_name,
+            cfg,
+            config_dir,
+        )
+
+
+# ============================================================
+# Organization policies
+# ============================================================
+
+POLICY_TYPE_IDS = {
+    "lease": "com.vmware.policy.deployment.lease",
+    "approval": "com.vmware.policy.approval",
+    "day2_action": "com.vmware.policy.deployment.action",
+    "iaas_resource": "com.vmware.policy.supervisor.iaas",
+}
+
+POLICY_TYPE_ALIASES = {
+    "lease": "lease",
+    "approval": "approval",
+    "day2": "day2_action",
+    "day2_action": "day2_action",
+    "day2action": "day2_action",
+    "day2-action": "day2_action",
+    "day2_actions": "day2_action",
+    "day2-actions": "day2_action",
+    "iaas": "iaas_resource",
+    "iaas_resource": "iaas_resource",
+    "iaas-resource": "iaas_resource",
+    "resource": "iaas_resource",
+    "resource_policy": "iaas_resource",
+}
+
+
+def organization_policies(
+    client: RestClient,
+    policy_type_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    page = 0
+    size = 200
+    result: List[Dict[str, Any]] = []
+
+    while True:
+        params = [
+            "expandDefinition=true",
+            f"page={page}",
+            f"size={size}",
+        ]
+
+        if policy_type_id:
+            params.append(
+                "typeId="
+                + urllib.parse.quote(
+                    str(policy_type_id),
+                    safe="",
+                )
+            )
+
+        payload = client.get(
+            "/policy/api/policies?" + "&".join(params)
+        )
+
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                "Policy API returned an unexpected response"
+            )
+
+        values = payload.get("content") or []
+        if not isinstance(values, list):
+            raise RuntimeError(
+                "Policy API response field 'content' is not an array"
+            )
+
+        result.extend(
+            item
+            for item in values
+            if isinstance(item, dict)
+        )
+
+        if bool(payload.get("last", False)):
+            break
+
+        total_pages = payload.get("totalPages")
+        if (
+            isinstance(total_pages, int)
+            and page + 1 >= total_pages
+        ):
+            break
+
+        if len(values) < size:
+            break
+
+        page += 1
+
+    return result
+
+
+def _normalize_policy_type(value: Any) -> str:
+    normalized = str(value or "").strip().casefold()
+
+    if normalized not in POLICY_TYPE_ALIASES:
+        raise RuntimeError(
+            f"Unsupported policy type '{value}'. Supported types: "
+            "lease, approval, day2_action, iaas_resource"
+        )
+
+    return POLICY_TYPE_ALIASES[normalized]
+
+
+def _policy_by_name(
+    client: RestClient,
+    name: str,
+    policy_type: str,
+) -> Optional[Dict[str, Any]]:
+    wanted = str(name or "").strip().casefold()
+    type_id = POLICY_TYPE_IDS[policy_type]
+
+    for policy in organization_policies(
+        client,
+        type_id,
+    ):
+        if (
+            str(policy.get("name", "") or "")
+            .strip()
+            .casefold()
+            == wanted
+        ):
+            return policy
+
+    return None
+
+
+def _project_id_by_name(
+    client: RestClient,
+    project_name: str,
+) -> str:
+    project = _project_by_name(
+        client,
+        project_name,
+    )
+
+    if not project:
+        raise RuntimeError(
+            f"Project '{project_name}' was not found in the "
+            "current organization"
+        )
+
+    project_id = str(
+        project.get("id", "") or ""
+    ).strip()
+
+    if not project_id:
+        raise RuntimeError(
+            f"Project '{project_name}' does not expose an ID"
+        )
+
+    if project_id.startswith("urn:"):
+        project_id = project_id.rsplit(":", 1)[-1]
+
+    return project_id
+
+
+
+def _load_policy_definition_file(
+    cfg: Dict[str, Any],
+    policy_name: str,
+    config_dir: Path,
+) -> Optional[Dict[str, Any]]:
+    definition = cfg.get("definition")
+    nested_definition_file = ""
+
+    if isinstance(definition, dict):
+        nested_definition_file = str(
+            definition.get("definition_file", "") or ""
+        ).strip()
+
+    definition_file = str(
+        cfg.get("definition_file", "") or nested_definition_file
+    ).strip()
+
+    if not definition_file:
+        return None
+
+    if yaml is None:
+        raise RuntimeError(
+            f"Policy '{policy_name}' uses definition_file but PyYAML "
+            "is not installed. Install it with: python3 -m pip install pyyaml"
+        )
+
+    path = resolve_path(
+        definition_file,
+        config_dir,
+    )
+
+    if not path.exists():
+        raise RuntimeError(
+            f"Policy '{policy_name}' definition_file not found: {path}"
+        )
+
+    with path.open("r", encoding="utf-8") as handle:
+        loaded = yaml.safe_load(handle)
+
+    if loaded is None:
+        loaded = {}
+
+    if not isinstance(loaded, dict):
+        raise RuntimeError(
+            f"Policy '{policy_name}' definition_file must contain a YAML object"
+        )
+
+    info(
+        f"Loaded policy definition for '{policy_name}' from '{path}'"
+    )
+
+    return loaded
+
+def _policy_definition(
+    policy_type: str,
+    cfg: Dict[str, Any],
+    name: str,
+    config_dir: Path,
+) -> Dict[str, Any]:
+    file_definition = _load_policy_definition_file(
+        cfg,
+        name,
+        config_dir,
+    )
+
+    if file_definition is not None:
+        raw_definition = file_definition
+    else:
+        raw_definition = cfg.get("definition")
+
+        if raw_definition is None:
+            raw_definition = {}
+
+    if not isinstance(raw_definition, dict):
+        raise RuntimeError(
+            f"Policy '{name}'.definition must be an object"
+        )
+
+    if policy_type == "lease":
+        lease_grace = int(
+            raw_definition.get(
+                "lease_grace_days",
+                cfg.get("lease_grace_days", 0),
+            )
+        )
+        lease_term_max = int(
+            raw_definition.get(
+                "lease_term_max_days",
+                cfg.get("lease_term_max_days", 0),
+            )
+        )
+        lease_total_term_max = int(
+            raw_definition.get(
+                "lease_total_term_max",
+                raw_definition.get(
+                    "lease_total_term_max_days",
+                    cfg.get(
+                        "lease_total_term_max_days",
+                        0,
+                    ),
+                ),
+            )
+        )
+
+        if not 0 <= lease_grace <= 127:
+            raise RuntimeError(
+                f"Lease policy '{name}'.definition.lease_grace_days "
+                "must be between 0 and 127"
+            )
+
+        if not 1 <= lease_term_max <= 32767:
+            raise RuntimeError(
+                f"Lease policy '{name}'.definition.lease_term_max_days "
+                "must be between 1 and 32767"
+            )
+
+        if not 1 <= lease_total_term_max <= 32767:
+            raise RuntimeError(
+                f"Lease policy '{name}'.definition.lease_total_term_max "
+                "must be between 1 and 32767"
+            )
+
+        if lease_total_term_max < lease_term_max:
+            raise RuntimeError(
+                f"Lease policy '{name}'.definition."
+                "lease_total_term_max cannot be less than "
+                "lease_term_max_days"
+            )
+
+        return {
+            "leaseGrace": lease_grace,
+            "leaseTermMax": lease_term_max,
+            "leaseTotalTermMax": lease_total_term_max,
+        }
+
+    if policy_type == "day2_action":
+        allowed_actions = (
+            raw_definition.get("allowed_actions")
+            or raw_definition.get("allowedActions")
+            or []
+        )
+
+        if not isinstance(allowed_actions, list) or not allowed_actions:
+            raise RuntimeError(
+                f"Day-2 action policy '{name}'.definition."
+                "allowed_actions must be a non-empty array"
+            )
+
+        normalized_actions = []
+
+        for item in allowed_actions:
+            if not isinstance(item, dict):
+                raise RuntimeError(
+                    f"Day-2 action policy '{name}'.definition."
+                    "allowed_actions entries must be objects"
+                )
+
+            actions = item.get("actions") or []
+            authorities = item.get("authorities") or []
+
+            if not isinstance(actions, list) or not actions:
+                raise RuntimeError(
+                    f"Day-2 action policy '{name}' has an "
+                    "allowed_actions entry without actions"
+                )
+
+            if not isinstance(authorities, list) or not authorities:
+                raise RuntimeError(
+                    f"Day-2 action policy '{name}' has an "
+                    "allowed_actions entry without authorities"
+                )
+
+            normalized_actions.append(
+                {
+                    "actions": actions,
+                    "authorities": authorities,
+                }
+            )
+
+        return {
+            "allowedActions": normalized_actions,
+        }
+
+    if policy_type == "approval":
+        allowed_actions = (
+            raw_definition.get("allowed_actions")
+            or raw_definition.get("allowedActions")
+            or []
+        )
+
+        if not isinstance(allowed_actions, list) or not allowed_actions:
+            raise RuntimeError(
+                f"Approval policy '{name}'.definition."
+                "allowed_actions must be a non-empty array"
+            )
+
+        if len(allowed_actions) != 1:
+            raise RuntimeError(
+                f"Approval policy '{name}' currently requires exactly one "
+                "definition.allowed_actions entry because the VCF Automation "
+                "approval Policy API expects one flat approval definition per "
+                "policy"
+            )
+
+        item = allowed_actions[0]
+
+        if not isinstance(item, dict):
+            raise RuntimeError(
+                f"Approval policy '{name}'.definition.allowed_actions[0] "
+                "must be an object"
+            )
+
+        actions = item.get("actions") or []
+        approvers = item.get("approvers") or []
+
+        if not isinstance(actions, list) or not actions:
+            raise RuntimeError(
+                f"Approval policy '{name}' requires actions"
+            )
+
+        if not isinstance(approvers, list) or not approvers:
+            raise RuntimeError(
+                f"Approval policy '{name}' requires approvers"
+            )
+
+        level = int(
+            item.get(
+                "level",
+                raw_definition.get("level", 1),
+            )
+        )
+
+        if level < 1:
+            raise RuntimeError(
+                f"Approval policy '{name}'.level must be >= 1"
+            )
+
+        return {
+            "level": level,
+            "actions": actions,
+            "approvers": approvers,
+            "approvalMode": str(
+                item.get("approval_mode", "ANY_OF")
+                or "ANY_OF"
+            ).strip().upper(),
+            "approverType": str(
+                item.get(
+                    "approval_type",
+                    item.get("approver_type", "ROLE"),
+                )
+                or "ROLE"
+            ).strip().upper(),
+            "autoApprovalExpiry": int(
+                item.get(
+                    "auto_approval_expiry_days",
+                    1,
+                )
+            ),
+            "autoApprovalDecision": str(
+                item.get(
+                    "auto_approval_decision",
+                    "REJECT",
+                )
+                or "REJECT"
+            ).strip().upper(),
+        }
+
+    if policy_type == "iaas_resource":
+        # Accept either:
+        #
+        #   "definition": {
+        #       "automation_policy": { ... }
+        #   }
+        #
+        #   "definition": {
+        #       "automationPolicy": { ... }
+        #   }
+        #
+        # or, more conveniently, treat definition itself as the
+        # automationPolicy body:
+        #
+        #   "definition": {
+        #       "validations": [...],
+        #       "failurePolicy": "Fail",
+        #       "matchConstraints": {...},
+        #       "validationActions": ["Deny"]
+        #   }
+        #
+        automation_policy = (
+            raw_definition.get("automation_policy")
+            or raw_definition.get("automationPolicy")
+            or cfg.get("automation_policy")
+            or cfg.get("automationPolicy")
+        )
+
+        if automation_policy is None and raw_definition:
+            automation_policy = {
+                key: value
+                for key, value in raw_definition.items()
+                if key not in {
+                    "definition_file",
+                    "criteria",
+                }
+            }
+
+        if not isinstance(automation_policy, dict) or not automation_policy:
+            raise RuntimeError(
+                f"IaaS resource policy '{name}' requires a non-empty "
+                "definition. The definition may either contain "
+                "'automation_policy'/'automationPolicy', or be the "
+                "automationPolicy body directly."
+            )
+
+        return {
+            "automationPolicy": automation_policy,
+        }
+
+    raise RuntimeError(
+        f"Unsupported policy type '{policy_type}'"
+    )
+
+
+def _normalize_policy_criteria(
+    cfg: Dict[str, Any],
+    policy_name: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Accept either API-style:
+      criteria.matchExpression
+
+    or JSON-friendly:
+      criteria.match_expression
+
+    and normalize to the VCF Automation Policy API shape.
+    """
+    criteria = cfg.get("criteria")
+
+    # Also allow criteria nested inside definition for convenience.
+    if criteria is None:
+        definition = cfg.get("definition")
+        if isinstance(definition, dict):
+            criteria = definition.get("criteria")
+
+    if criteria in (None, {}):
+        return None
+
+    if not isinstance(criteria, dict):
+        raise RuntimeError(
+            f"Policy '{policy_name}'.criteria must be an object"
+        )
+
+    raw_expressions = (
+        criteria.get("matchExpression")
+        or criteria.get("match_expression")
+        or []
+    )
+
+    if not isinstance(raw_expressions, list):
+        raise RuntimeError(
+            f"Policy '{policy_name}'.criteria.match_expression "
+            "must be an array"
+        )
+
+    expressions = []
+
+    for index, expression in enumerate(raw_expressions):
+        if not isinstance(expression, dict):
+            raise RuntimeError(
+                f"Policy '{policy_name}'.criteria.match_expression"
+                f"[{index}] must be an object"
+            )
+
+        key = str(
+            expression.get("key", "") or ""
+        ).strip()
+        operator = str(
+            expression.get("operator", "") or ""
+        ).strip()
+        value = expression.get("value")
+
+        if not key:
+            raise RuntimeError(
+                f"Policy '{policy_name}'.criteria.match_expression"
+                f"[{index}].key is required"
+            )
+
+        if not operator:
+            raise RuntimeError(
+                f"Policy '{policy_name}'.criteria.match_expression"
+                f"[{index}].operator is required"
+            )
+
+        if "value" not in expression:
+            raise RuntimeError(
+                f"Policy '{policy_name}'.criteria.match_expression"
+                f"[{index}].value is required"
+            )
+
+        expressions.append(
+            {
+                "key": key,
+                "operator": operator,
+                "value": value,
+            }
+        )
+
+    normalized: Dict[str, Any] = {
+        "matchExpression": expressions,
+    }
+
+    # Preserve any additional API-supported criteria fields verbatim.
+    for key, value in criteria.items():
+        if key not in {
+            "matchExpression",
+            "match_expression",
+        }:
+            normalized[key] = value
+
+    return normalized
+
+def _normalize_policy_config(
+    client: RestClient,
+    cfg: Dict[str, Any],
+    config_dir: Path,
+) -> Dict[str, Any]:
+    if not isinstance(cfg, dict):
+        raise RuntimeError(
+            "Each policies entry must be an object"
+        )
+
+    policy_type = _normalize_policy_type(
+        cfg.get("type")
+    )
+
+    name = str(
+        cfg.get("name", "") or ""
+    ).strip()
+
+    if not name:
+        raise RuntimeError(
+            f"Each {policy_type} policy requires 'name'"
+        )
+
+    scope = str(
+        cfg.get("scope", "organization")
+        or "organization"
+    ).strip().casefold()
+
+    if scope in {"org", "organization"}:
+        scope = "organization"
+    elif scope == "project":
+        scope = "project"
+    else:
+        raise RuntimeError(
+            f"Policy '{name}' has unsupported scope '{scope}'. "
+            "Expected 'organization' or 'project'"
+        )
+
+    enforcement_type = str(
+        cfg.get("enforcement_type", "HARD")
+        or "HARD"
+    ).strip().upper()
+
+    if enforcement_type not in {"HARD", "SOFT"}:
+        raise RuntimeError(
+            f"Policy '{name}' has invalid enforcement_type "
+            f"'{enforcement_type}'. Expected HARD or SOFT"
+        )
+
+    project_id = None
+    project_name = None
+
+    if scope == "project":
+        project_name = str(
+            cfg.get("project_name", "") or ""
+        ).strip()
+
+        if not project_name:
+            raise RuntimeError(
+                f"Policy '{name}' with scope='project' "
+                "requires project_name"
+            )
+
+        project_id = _project_id_by_name(
+            client,
+            project_name,
+        )
+
+    criteria = _normalize_policy_criteria(
+        cfg,
+        name,
+    )
+
+    desired: Dict[str, Any] = {
+        "name": name,
+        "description": str(
+            cfg.get("description", "") or ""
+        ),
+        "typeId": POLICY_TYPE_IDS[policy_type],
+        "enforcementType": enforcement_type,
+        "definition": _policy_definition(
+            policy_type,
+            cfg,
+            name,
+            config_dir,
+        ),
+    }
+
+    if project_id:
+        desired["projectId"] = project_id
+
+    if criteria:
+        desired["criteria"] = criteria
+
+    return {
+        "policy_type": policy_type,
+        "scope": scope,
+        "project_name": project_name,
+        "desired": desired,
+    }
+
+
+def _policy_comparable(
+    policy: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if not isinstance(policy, dict):
+        return {}
+
+    result: Dict[str, Any] = {
+        "name": str(
+            policy.get("name", "") or ""
+        ).strip(),
+        "description": str(
+            policy.get("description", "") or ""
+        ),
+        "typeId": str(
+            policy.get("typeId", "") or ""
+        ).strip(),
+        "enforcementType": str(
+            policy.get("enforcementType", "") or ""
+        ).strip().upper(),
+        "definition": (
+            policy.get("definition")
+            if isinstance(
+                policy.get("definition"),
+                dict,
+            )
+            else {}
+        ),
+    }
+
+    project_id = str(
+        policy.get("projectId", "") or ""
+    ).strip()
+
+    if project_id:
+        if project_id.startswith("urn:"):
+            project_id = project_id.rsplit(":", 1)[-1]
+
+        result["projectId"] = project_id
+
+    criteria = policy.get("criteria")
+    if isinstance(criteria, dict) and criteria:
+        result["criteria"] = criteria
+
+    return result
+
+
+def configure_organization_policy(
+    client: RestClient,
+    org_name: str,
+    cfg: Dict[str, Any],
+    config_dir: Path,
+) -> None:
+    normalized = _normalize_policy_config(
+        client,
+        cfg,
+        config_dir,
+    )
+
+    policy_type = normalized["policy_type"]
+    scope = normalized["scope"]
+    project_name = normalized["project_name"]
+    desired = normalized["desired"]
+    name = desired["name"]
+
+    existing = _policy_by_name(
+        client,
+        name,
+        policy_type,
+    )
+
+    desired_compare = _policy_comparable(
+        desired
+    )
+    existing_compare = _policy_comparable(
+        existing
+    )
+
+    scope_text = (
+        f"project '{project_name}'"
+        if scope == "project"
+        else f"organization '{org_name}'"
+    )
+
+    display_type = {
+        "lease": "Lease",
+        "approval": "Approval",
+        "day2_action": "Day-2 action",
+        "iaas_resource": "IaaS resource",
+    }[policy_type]
+
+    if existing and existing_compare == desired_compare:
+        skip(
+            f"{display_type} policy '{name}' already matches "
+            f"configuration at {scope_text} scope"
+        )
+        return
+
+    body = dict(desired)
+
+    if existing:
+        policy_id = str(
+            existing.get("id", "") or ""
+        ).strip()
+
+        if not policy_id:
+            raise RuntimeError(
+                f"Existing policy '{name}' has no ID"
+            )
+
+        body["id"] = policy_id
+
+        differences = []
+
+        for key in (
+            "description",
+            "enforcementType",
+            "projectId",
+            "definition",
+            "criteria",
+        ):
+            if (
+                existing_compare.get(key)
+                != desired_compare.get(key)
+            ):
+                differences.append(key)
+
+        info(
+            f"{display_type} policy '{name}' differs from desired "
+            f"configuration: {', '.join(differences)}"
+        )
+
+        update(
+            f"{display_type} policy '{name}' at "
+            f"{scope_text} scope"
+        )
+    else:
+        create(
+            f"{display_type} policy '{name}' at "
+            f"{scope_text} scope"
+        )
+
+    info(
+        f"{display_type} policy payload for '{name}':\n"
+        f"{json.dumps(body, indent=2)}"
+    )
+
+    client.post(
+        "/policy/api/policies",
+        json=body,
+    )
+
+    current = _policy_by_name(
+        client,
+        name,
+        policy_type,
+    )
+
+    if not current:
+        raise RuntimeError(
+            f"{display_type} policy '{name}' was submitted "
+            "but could not be queried afterwards"
+        )
+
+    current_compare = _policy_comparable(
+        current
+    )
+
+    if current_compare != desired_compare:
+        raise RuntimeError(
+            f"{display_type} policy '{name}' was submitted but "
+            f"does not match desired configuration.\n"
+            f"Desired:\n"
+            f"{json.dumps(desired_compare, indent=2)}\n"
+            f"Current:\n"
+            f"{json.dumps(current_compare, indent=2)}"
+        )
+
+    info(
+        f"{display_type} policy '{name}' verified at "
+        f"{scope_text} scope"
+    )
+
+
+def configure_organization_policies(
+    client: RestClient,
+    org_name: str,
+    policies_cfg: Any,
+    config_dir: Path,
+) -> None:
+    if policies_cfg in (None, [], {}):
+        return
+
+    if not isinstance(policies_cfg, list):
+        raise RuntimeError(
+            f"vcfa.organizations['{org_name}'].policies "
+            "must be an array"
+        )
+
+    seen = set()
+
+    for cfg in policies_cfg:
+        if not isinstance(cfg, dict):
+            raise RuntimeError(
+                f"Each policy in organization '{org_name}' "
+                "must be an object"
+            )
+
+        name = str(
+            cfg.get("name", "") or ""
+        ).strip()
+
+        if not name:
+            raise RuntimeError(
+                f"Each policy in organization '{org_name}' "
+                "requires 'name'"
+            )
+
+        policy_type = _normalize_policy_type(
+            cfg.get("type")
+        )
+
+        key = (
+            policy_type,
+            name.casefold(),
+        )
+
+        if key in seen:
+            raise RuntimeError(
+                f"Policy '{name}' of type '{policy_type}' "
+                f"is configured more than once in organization "
+                f"'{org_name}'"
+            )
+
+        seen.add(key)
+
+        configure_organization_policy(
+            client,
+            org_name,
+            cfg,
+            config_dir,
+        )
+
+
+# ============================================================
+
 # Organization Supervisor Namespaces (CCI)
 # ============================================================
 
@@ -9335,10 +11053,6 @@ def _supervisor_namespace_payload(
             continue
         seen_zones.add(zone_key)
 
-        # The API requires all four limit/reservation fields, even when the
-        # namespace JSON only selects a zone.  Start from the selected
-        # NamespaceClassConfig zone (or wildcard '*') and then allow explicit
-        # namespace-level overrides.
         defaults = _namespace_class_zone_defaults(
             class_config,
             zone_name,
@@ -9355,15 +11069,33 @@ def _supervisor_namespace_payload(
             "memory_limit": "memoryLimit",
             "memory_reservation": "memoryReservation",
         }
+
         for source_key, target_key in override_map.items():
             if zone_cfg.get(source_key) is not None:
                 zone[target_key] = str(zone_cfg[source_key])
 
+        required_zone_fields = (
+            "cpuLimit",
+            "cpuReservation",
+            "memoryLimit",
+            "memoryReservation",
+        )
+
+        missing_zone_fields = [
+            field
+            for field in required_zone_fields
+            if not str(zone.get(field, "") or "").strip()
+        ]
+
+        if missing_zone_fields:
+            raise RuntimeError(
+                f"Namespace '{name or '<unnamed>'}' zone '{zone_name}' "
+                f"is missing required override fields: "
+                f"{', '.join(missing_zone_fields)}"
+            )
+
         zone_payload.append(zone)
 
-    # Storage classes:
-    # - If the NamespaceClassConfig already defines storageClasses, inherit them.
-    # - Otherwise use namespaces[].storage_classes as namespace-level overrides.
     class_spec = class_config.get("spec") or {}
     if not isinstance(class_spec, dict):
         class_spec = {}
@@ -9378,44 +11110,79 @@ def _supervisor_namespace_payload(
             f"Namespace '{name or '<unnamed>'}'.storage_classes must be an array"
         )
 
-    storage_override: List[Dict[str, Any]] = []
+    def normalize_storage_classes(values: List[Any], source_name: str) -> List[Dict[str, Any]]:
+        result: List[Dict[str, Any]] = []
+        seen = set()
 
-    if not class_storage_classes:
-        seen_storage = set()
-
-        for storage_cfg in namespace_storage_classes:
+        for storage_cfg in values:
             if not isinstance(storage_cfg, dict):
                 raise RuntimeError(
-                    f"Namespace '{name or '<unnamed>'}' storage_classes entries "
-                    "must be objects"
+                    f"{source_name} storage class entries must be objects"
                 )
 
             storage_name = str(storage_cfg.get("name", "") or "").strip()
             if not storage_name:
                 raise RuntimeError(
-                    f"Namespace '{name or '<unnamed>'}' contains a storage class "
-                    "without a name"
+                    f"{source_name} contains a storage class without a name"
                 )
 
             key = storage_name.casefold()
-            if key in seen_storage:
+            if key in seen:
                 continue
-            seen_storage.add(key)
+            seen.add(key)
 
             entry: Dict[str, Any] = {"name": storage_name}
-
             limit = storage_cfg.get("limit")
             if limit is not None and str(limit).strip():
                 entry["limit"] = str(limit).strip()
 
-            storage_override.append(entry)
+            result.append(entry)
 
-        if not storage_override:
-            raise RuntimeError(
-                f"Cannot create namespace '{name or '<unnamed>'}': "
-                f"SupervisorNamespaceClassConfig '{class_name}' has no "
-                "storageClasses and namespaces[].storage_classes is empty"
+        return result
+
+    concrete_class_storage = [
+        storage_cfg
+        for storage_cfg in class_storage_classes
+        if isinstance(storage_cfg, dict)
+        and str(storage_cfg.get("name", "") or "").strip()
+        and str(storage_cfg.get("name", "") or "").strip() != "*"
+    ]
+
+    if concrete_class_storage:
+        effective_storage = normalize_storage_classes(
+            concrete_class_storage,
+            f"SupervisorNamespaceClassConfig '{class_name}'",
+        )
+        info(
+            f"Namespace '{name or '<generated>'}' using "
+            f"{len(effective_storage)} concrete storage class(es) from "
+            f"NamespaceClassConfig '{class_name}'"
+        )
+    else:
+        if class_storage_classes:
+            info(
+                f"NamespaceClassConfig '{class_name}' exposes only wildcard "
+                "storage classes; using namespace-level storage_classes instead"
             )
+
+        effective_storage = normalize_storage_classes(
+            namespace_storage_classes,
+            f"Namespace '{name or '<generated>'}'",
+        )
+
+        if effective_storage:
+            info(
+                f"Namespace '{name or '<generated>'}' using "
+                f"{len(effective_storage)} namespace-level storage "
+                "class override(s)"
+            )
+
+    if not effective_storage:
+        raise RuntimeError(
+            f"Cannot create namespace '{name or '<unnamed>'}': "
+            f"SupervisorNamespaceClassConfig '{class_name}' has no "
+            "storageClasses and namespaces[].storage_classes is empty"
+        )
 
     spec: Dict[str, Any] = {
         "description": str(namespace_cfg.get("description", "") or ""),
@@ -9423,11 +11190,9 @@ def _supervisor_namespace_payload(
         "className": class_name,
         "initialClassConfigOverrides": {
             "zones": zone_payload,
+            "storageClasses": effective_storage,
         },
     }
-
-    if storage_override:
-        spec["initialClassConfigOverrides"]["storageClasses"] = storage_override
 
     vpc_name = str(namespace_cfg.get("vpcName", "") or "").strip()
     if vpc_name:
@@ -9745,10 +11510,31 @@ def configure_organization_namespaces(
         existing = None
 
         if namespace_name:
+            # Concrete name always wins and is matched exactly.
             existing = cci.find_supervisor_namespace(
                 project_name,
                 namespace_name,
             )
+        elif generate_name:
+            # If name is empty, reconcile against the generated Kubernetes
+            # metadata.name using generate_name as a prefix.
+            existing = cci.find_supervisor_namespace_by_generate_name(
+                project_name,
+                generate_name,
+            )
+
+            if existing:
+                existing_meta = existing.get("metadata") or {}
+                actual_name = (
+                    str(existing_meta.get("name", "") or "").strip()
+                    if isinstance(existing_meta, dict)
+                    else ""
+                )
+                info(
+                    f"Supervisor namespace '{actual_name or '<generated>'}' "
+                    f"matched generateName prefix '{generate_name}' in "
+                    f"project '{project_name}'"
+                )
 
         if namespace_name and not existing:
             for candidate_project in organization_projects(client):
@@ -9777,8 +11563,15 @@ def configure_organization_namespaces(
                     break
 
         if existing:
+            existing_meta = existing.get("metadata") or {}
+            actual_name = (
+                str(existing_meta.get("name", "") or "").strip()
+                if isinstance(existing_meta, dict)
+                else ""
+            )
+
             compare_supervisor_namespace(
-                namespace_name,
+                namespace_name or actual_name or generate_name,
                 namespace_cfg,
                 existing,
             )
@@ -10575,10 +12368,14 @@ def main():
                     namespaces_cfg,
                 )
 
-            if org_cfg.get("blueprints"):
-                warn(
-                    f"blueprints configured for '{name}' but blueprint "
-                    "processing is not implemented yet"
+            blueprints_cfg = org_cfg.get("blueprints") or []
+            if blueprints_cfg:
+                print(f"\n--- Blueprints: {name} ---")
+                configure_organization_blueprints(
+                    org_client,
+                    name,
+                    blueprints_cfg,
+                    config_dir,
                 )
 
             if org_cfg.get("catalog_items"):
@@ -10587,10 +12384,14 @@ def main():
                     "item processing is not implemented yet"
                 )
 
-            if org_cfg.get("policies"):
-                warn(
-                    f"policies configured for '{name}' but policy "
-                    "processing is not implemented yet"
+            policies_cfg = org_cfg.get("policies") or []
+            if policies_cfg:
+                print(f"\n--- Policies: {name} ---")
+                configure_organization_policies(
+                    org_client,
+                    name,
+                    policies_cfg,
+                    config_dir,
                 )
 
             if org_cfg.get("deployments"):
