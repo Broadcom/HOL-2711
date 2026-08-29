@@ -95,6 +95,7 @@
     "ignore_certificate_errors": true,
     "provider":
     {
+      "enable_provider_consumption_org": false,
       "api_token_file": "/home/holuser/Desktop/API Tokens/API-Provider.Admin-VCFA.txt",
       "local_auth": { 
         "username": "admin",
@@ -325,7 +326,7 @@
                 {
                   "zone": "z-wld-a",
                   "cpu_limit_GHz": 30,
-                  "memory_limit_GB": 30,
+                  "memory_limit_GB": 50,
                   "cpu_reservation_GHz": 1,
                   "memory_reservation_GB": 1
                 }
@@ -542,6 +543,7 @@
             "test": true
           }
         },
+        "integrations": [],
         "namespaceClasses": [],
         "delete_default_project": true,
         "projects": [      

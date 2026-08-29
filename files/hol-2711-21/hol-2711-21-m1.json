@@ -95,6 +95,7 @@
     "ignore_certificate_errors": true,
     "provider":
     {
+      "enable_provider_consumption_org": false,
       "api_token_file": "/home/holuser/Desktop/API Tokens/API-Provider.Admin-VCFA.txt",
       "local_auth": { 
         "username": "admin",

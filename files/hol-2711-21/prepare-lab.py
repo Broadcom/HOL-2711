@@ -5934,6 +5934,7 @@ def configure_organization_content_libraries(
     provider_org_cfg: Dict[str, Any],
     libraries_cfg: Dict[str, Any],
     config_dir: Path,
+    skip_upload: bool = False,
 ) -> None:
     if not libraries_cfg:
         return
@@ -5990,14 +5991,17 @@ def configure_organization_content_libraries(
                 )
             continue
 
-        for item_cfg in items:
-            upload_content_library_item(
-                organization_scoped_client(client, org),
-                library,
-                item_cfg,
-                config_dir,
-                system_scope=False,
-            )
+        if skip_upload:
+            skip(f"Skipping item uploads for organization content library '{library_name}' (--skip-content-library-upload)")
+        else:
+            for item_cfg in items:
+                upload_content_library_item(
+                    organization_scoped_client(client, org),
+                    library,
+                    item_cfg,
+                    config_dir,
+                    system_scope=False,
+                )
 
 
 # ============================================================
@@ -8377,54 +8381,54 @@ def validate_vcfa_configuration(
                     )
 
         first_user = provider_org_cfg.get("first_user")
+        is_provider_consumption = bool(provider_org_cfg.get("is_provider_consumption_org", False))
 
         if not isinstance(first_user, dict):
             raise RuntimeError(
-                f"vcfa.provider.organizations['{org_name}'].first_user "
-                "is required"
+                f"vcfa.provider.organizations['{org_name}'].first_user is required"
             )
 
-        first_username = str(
-            first_user.get("username", "") or ""
-        ).strip()
+        if not is_provider_consumption:
+            first_username = str(
+                first_user.get("username", "") or ""
+            ).strip()
 
-        if not first_username:
-            raise RuntimeError(
-                f"vcfa.provider.organizations['{org_name}']."
-                "first_user.username is required"
+            if not first_username:
+                raise RuntimeError(
+                    f"vcfa.provider.organizations['{org_name}']."
+                    "first_user.username is required"
+                )
+
+            if not str(
+                first_user.get("password_file", "") or ""
+            ).strip():
+                raise RuntimeError(
+                    f"vcfa.provider.organizations['{org_name}']."
+                    "first_user.password_file is required"
+                )
+
+            create_token = bool(
+                first_user.get("create_token", False)
             )
-
-        if not str(
-            first_user.get("password_file", "") or ""
-        ).strip():
-            raise RuntimeError(
-                f"vcfa.provider.organizations['{org_name}']."
-                "first_user.password_file is required"
+            replace_token = bool(
+                first_user.get("replace_token", False)
             )
+            token_file = str(
+                first_user.get("api_token_file", "") or ""
+            ).strip()
 
-        create_token = bool(
-            first_user.get("create_token", False)
-        )
-        replace_token = bool(
-            first_user.get("replace_token", False)
-        )
-        token_file = str(
-            first_user.get("api_token_file", "") or ""
-        ).strip()
+            if create_token and not token_file:
+                raise RuntimeError(
+                    f"vcfa.provider.organizations['{org_name}']."
+                    "first_user.api_token_file is required when create_token=true"
+                )
 
-        if create_token and not token_file:
-            raise RuntimeError(
-                f"vcfa.provider.organizations['{org_name}']."
-                "first_user.api_token_file is required when "
-                "create_token=true"
-            )
-
-        if replace_token and not create_token:
-            warn(
-                f"Organization '{org_name}' first_user has "
-                "replace_token=true but create_token=false; "
-                "replace_token will be ignored"
-            )
+            if replace_token and not create_token:
+                warn(
+                    f"Organization '{org_name}' first_user has "
+                    "replace_token=true but create_token=false; "
+                    "replace_token will be ignored"
+                )
 
     if org_cfgs and not isinstance(org_cfgs, dict):
         raise RuntimeError(
@@ -10824,10 +10828,24 @@ def configure_organization_policy(
         f"{json.dumps(body, indent=2)}"
     )
 
-    client.post(
-        "/policy/api/policies",
-        json=body,
-    )
+    if existing:
+        if "projectId" in differences:
+            raise RuntimeError(
+                f"Cannot change the scope or project of existing "
+                f"{display_type} policy '{name}'. You must delete "
+                f"the policy in VCF Automation first to change its scope."
+            )
+        
+        encoded_id = urllib.parse.quote(policy_id, safe="")
+        client.put(
+            f"/policy/api/policies/{encoded_id}",
+            json=body,
+        )
+    else:
+        client.post(
+            "/policy/api/policies",
+            json=body,
+        )
 
     current = _policy_by_name(
         client,
@@ -11673,7 +11691,171 @@ def configure_organization_namespaces(
                 f"'{generate_name}' in project '{project_name}'"
             )
 
+def enable_provider_consumption_org_feature(client: RestClient):
+    feature_urn = "urn:vcloud:featureflag:PROVIDER_CONSUMPTION_ORG"
+    encoded_urn = urllib.parse.quote(feature_urn, safe="")
+    
+    try:
+        current = client.get(f"/cloudapi/1.0.0/featureFlags/{encoded_urn}")
+        if isinstance(current, dict) and current.get("enabled"):
+            skip("Feature flag 'PROVIDER_CONSUMPTION_ORG' is already enabled")
+            return
+    except RuntimeError:
+        pass
 
+    body = {
+        "id": feature_urn,
+        "name": "PROVIDER_CONSUMPTION_ORG",
+        "usage": "ALPHA",
+        "enabled": True,
+        "displayName": "Provider Consumption Org",
+        "displayDescription": "This feature enables the use of the Provider Consumption Org."
+    }
+
+    update("Feature flag 'PROVIDER_CONSUMPTION_ORG' -> enabled=true")
+    client.put(
+        f"/cloudapi/1.0.0/featureFlags/{encoded_urn}",
+        json=body
+    )
+
+def configure_orchestrator_integration(client: RestClient, cfg: Dict[str, Any]):
+    name = str(cfg.get("name", "embedded")).strip()
+    
+    integrations = client.get("/iaas/api/integrations?apiVersion=2021-07-15")
+    existing_items = integrations.get("content", []) if isinstance(integrations, dict) else []
+    
+    existing = next(
+        (x for x in existing_items if x.get("name") == name and x.get("integrationType") == "vro"), 
+        None
+    )
+    
+    if existing:
+        skip(f"vRO integration '{name}' already exists")
+        return existing
+
+    body = {
+        "integrationProperties": {
+            "vroAuthType": "CSP",
+            "hostName": cfg.get("host_name", "https://embedded.orchestrator"),
+            "dcId": "onprem",
+            "privateKeyId": "",
+            "privateKey": "",
+            "refreshToken": "",
+            "acceptSelfSignedCertificate": bool(cfg.get("accept_self_signed_certificate", False)),
+            "integrationType": "embedded"
+        },
+        "customProperties": {
+            "endpointEnabled": True
+        },
+        "integrationType": "vro",
+        "associatedCloudAccountIds": [],
+        "associatedMobilityCloudAccountIds": {},
+        "privateKey": "",
+        "privateKeyId": "",
+        "name": name
+    }
+
+    create(f"vRO integration '{name}'")
+    return client.post("/iaas/api/integrations?apiVersion=2021-07-15", json=body)
+
+def configure_organization_deployments(
+    client: RestClient,
+    server: str,
+    org_name: str,
+    org_cfg: Dict[str, Any],
+    config_dir: Path,
+    verify: bool,
+) -> None:
+    deployments_cfg = org_cfg.get("deployments") or []
+    if not isinstance(deployments_cfg, list):
+        raise RuntimeError(f"deployments for organization '{org_name}' must be an array")
+
+    for cfg in deployments_cfg:
+        if not isinstance(cfg, dict):
+            raise RuntimeError(f"Each deployments entry in '{org_name}' must be an object")
+
+        deployment_name = str(cfg.get("deployment_name", "")).strip()
+        project_name = str(cfg.get("project_name", "")).strip()
+        blueprint_name = str(cfg.get("blueprint_name", "")).strip()
+        
+        if not deployment_name:
+            raise RuntimeError(f"A deployment in '{org_name}' is missing 'deployment_name'")
+        if not project_name:
+            raise RuntimeError(f"Deployment '{deployment_name}' requires 'project_name'")
+        if not blueprint_name:
+            raise RuntimeError(
+                f"Deployment '{deployment_name}' is missing 'blueprint_name'. "
+                "You must specify the name of the blueprint to deploy in your JSON."
+            )
+
+        version = str(cfg.get("version", "")).strip()
+        inputs = cfg.get("inputs") or {}
+        deploy_as = str(cfg.get("deploy_as", "")).strip()
+
+        # Resolve IDs using the privileged organization admin client to avoid read-only RBAC errors
+        project = _project_by_name(client, project_name)
+        if not project:
+            raise RuntimeError(f"Project '{project_name}' not found for deployment '{deployment_name}'")
+        
+        project_id = str(project.get("id", "")).strip()
+        if project_id.startswith("urn:"):
+            project_id = project_id.rsplit(":", 1)[-1]
+
+        blueprint = _blueprint_by_name(client, blueprint_name)
+        if not blueprint:
+            raise RuntimeError(f"Blueprint '{blueprint_name}' not found for deployment '{deployment_name}'")
+        
+        blueprint_id = str(blueprint.get("id", "")).strip()
+
+        # Check if the deployment already exists
+        encoded_name = urllib.parse.quote(f"name eq '{deployment_name}'", safe="")
+        try:
+            res = client.get(f"/deployment/api/deployments?$filter={encoded_name}")
+        except RuntimeError as exc:
+            raise RuntimeError(f"Failed to query existing deployments: {exc}") from None
+            
+        existing = None
+        for d in (res.get("content", []) if isinstance(res, dict) else []):
+            if str(d.get("name", "")).strip().casefold() == deployment_name.casefold():
+                existing = d
+                break
+
+        if existing:
+            skip(f"Deployment '{deployment_name}' already exists")
+            continue
+
+        deploy_client = client
+        if deploy_as:
+            info(f"Authenticating as '{deploy_as}@{org_name}' for deployment '{deployment_name}'")
+            admin_cfg = organization_admin_config(org_name, org_cfg)
+            password_file_value = str(admin_cfg.get("password_file", "")).strip()
+            if not password_file_value:
+                raise RuntimeError(f"Cannot deploy as '{deploy_as}'; org_admin.password_file is missing")
+            
+            password = read_text_file(resolve_path(password_file_value, config_dir))
+            deploy_client, _ = vcfa_tenant_password_session(
+                server,
+                org_name,
+                deploy_as,
+                password,
+                verify,
+            )
+
+        body = {
+            "blueprintId": blueprint_id,
+            "projectId": project_id,
+            "deploymentName": deployment_name,
+            "inputs": inputs,
+            "reason": "Automated deployment by lab script"
+        }
+        if version:
+            body["version"] = version
+
+        create(f"Deployment '{deployment_name}' from blueprint '{blueprint_name}' as '{deploy_as or 'org admin'}'")
+        deploy_client.post("/blueprint/api/blueprint-requests", json=body)
+        
+        # Sleep briefly to ensure the request is registered by the backend
+        time.sleep(3)
 # ============================================================
 # Main orchestration
 # Shared REST/CCI reconciliation primitives are defined above.
@@ -11682,6 +11864,11 @@ def configure_organization_namespaces(
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("config", help="Path to JSON configuration")
+    parser.add_argument(
+        "--skip-content-library-upload", 
+        action="store_true", 
+        help="Skip uploading files to provider and organization content libraries"
+    )
     args = parser.parse_args()
 
     config_path = Path(args.config).expanduser().resolve()
@@ -11974,13 +12161,29 @@ def main():
                         skip(f"Ignoring {len(items)} local item(s) for subscribed content library '{lib_cfg.get('name','')}'")
                     continue
 
-                for item_cfg in items:
-                    upload_content_library_item(
-                        provider_content_client,
-                        library,
-                        item_cfg,
-                        config_dir,
-                    )
+                if args.skip_content_library_upload:
+                    skip(f"Skipping item uploads for provider content library '{library_name}' (--skip-content-library-upload)")
+                else:
+                    for item_cfg in items:
+                        upload_content_library_item(
+                            provider_content_client,
+                            library,
+                            item_cfg,
+                            config_dir,
+                        )
+
+        if bool(provider_cfg.get("enable_provider_consumption_org", False)):
+            print("\n========================================")
+            print(" VCFA Feature Flags")
+            print("========================================")
+            enable_provider_consumption_org_feature(provider_client)
+            
+            # --- NEW: Refresh the provider token to get IaaS claims ---
+            info("Waiting 5 seconds for the feature flag to propagate...")
+            time.sleep(5)
+            info("Fetching a fresh provider token with updated entitlements...")
+            provider_client = vcfa_client(vcfa_cfg["server"], token_file, not ignore)
+            # ----------------------------------------------------------
 
         orgs_cfg = provider_cfg.get("organizations") or {}
         if orgs_cfg:
@@ -11988,7 +12191,7 @@ def main():
                 raise RuntimeError(
                     "vcfa.provider.organizations must be an object keyed by organization name"
                 )
-
+        
             print("\n========================================")
             print(" VCFA Provider Organizations")
             print("========================================")
@@ -12002,32 +12205,157 @@ def main():
                 effective_org_cfg = dict(org_cfg)
                 effective_org_cfg["name"] = org_name
 
+                is_provider_consumption = bool(
+                    effective_org_cfg.get("is_provider_consumption_org", False)
+                )
+
+# Intercept the Provider Consumption Org
+                if is_provider_consumption:
+                    integrations = effective_org_cfg.get("integrations", [])
+                    if integrations:
+                        print("\n========================================")
+                        print(f" VCFA Provider Integrations ({org_name})")
+                        print("========================================")
+                        
+                        info("Waiting for Provider Consumption Org IaaS context to initialize...")
+                        deadline = time.time() + 300
+                        iaas_ready = False
+                        pco_client = None
+                        
+                        # Fetch local admin credentials to perform JWT exchange
+                        local_auth = provider_cfg.get("local_auth", {})
+                        pco_username = str(local_auth.get("username", "admin")).strip()
+                        pco_password_file = str(local_auth.get("password_file", "")).strip()
+                        
+                        if not pco_password_file:
+                            raise RuntimeError("vcfa.provider.local_auth.password_file is required for PCO integrations")
+                            
+                        if "@" not in pco_username:
+                            pco_username = f"{pco_username}@system"
+                            
+                        pco_password = read_text_file(resolve_path(pco_password_file, config_dir))
+                        pco_auth = base64.b64encode(f"{pco_username}:{pco_password}".encode("utf-8")).decode("ascii")
+                        
+                        while time.time() < deadline:
+                            try:
+                                # Ensure the PCO has been created by the backend
+                                pco_org = provider_organization(provider_client, "ProviderConsumptionOrg")
+                                if not pco_org:
+                                    info("Provider Consumption Org is not yet available; retrying...")
+                                    time.sleep(15)
+                                    continue
+                                
+                                # 1. Get a legacy Actor session token for the System Admin (NO context header yet)
+                                session_res = requests.post(
+                                    f"https://{vcfa_cfg['server']}/cloudapi/1.0.0/sessions/provider",
+                                    headers={
+                                        "Authorization": f"Basic {pco_auth}",
+                                        "Accept": "application/json;version=9.1.0"
+                                    },
+                                    verify=not ignore,
+                                    timeout=120
+                                )
+                                
+                                if not session_res.ok:
+                                    raise RuntimeError(f"Failed System session login: {session_res.text}")
+                                    
+                                legacy_token = session_res.headers.get("X-VMWARE-VCLOUD-ACCESS-TOKEN") or session_res.headers.get("x-vmware-vcloud-access-token")
+                                if not legacy_token:
+                                    raise RuntimeError("Failed to extract X-VMWARE-VCLOUD-ACCESS-TOKEN")
+                                
+                                # 2. Register OAuth Client in PCO
+                                reg_res = requests.post(
+                                    f"https://{vcfa_cfg['server']}/oauth/tenant/ProviderConsumptionOrg/register",
+                                    json={"client_name": "pco-iaas-temp-client"},
+                                    headers={
+                                        "Authorization": f"Bearer {legacy_token}",
+                                        "Accept": "application/json"
+                                    },
+                                    verify=not ignore,
+                                    timeout=120
+                                )
+                                
+                                if not reg_res.ok:
+                                    raise RuntimeError(f"Failed OAuth register in PCO: {reg_res.text}")
+                                
+                                client_id = reg_res.json().get("client_id")
+                                
+                                # 3. Exchange legacy token for modern PCO-scoped JWT Bearer token
+                                token_res = requests.post(
+                                    f"https://{vcfa_cfg['server']}/oauth/tenant/ProviderConsumptionOrg/token",
+                                    data={
+                                        "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+                                        "assertion": legacy_token,
+                                        "client_id": client_id
+                                    },
+                                    headers={
+                                        "Accept": "application/json;version=9.1.0",
+                                        "Content-Type": "application/x-www-form-urlencoded"
+                                    },
+                                    verify=not ignore,
+                                    timeout=120
+                                )
+                                
+                                if not token_res.ok:
+                                    raise RuntimeError(f"Failed JWT exchange in PCO: {token_res.text}")
+                                    
+                                pco_jwt = token_res.json().get("access_token")
+                                if not pco_jwt:
+                                    raise RuntimeError("Failed to extract access_token from JWT exchange")
+                                
+                                # 4. Build RestClient with true PCO JWT
+                                pco_client = RestClient(
+                                    vcfa_cfg["server"], 
+                                    verify=not ignore, 
+                                    headers={
+                                        "Authorization": f"Bearer {pco_jwt}", 
+                                        "Accept": "application/json"
+                                    }
+                                )
+                                
+                                # Test if the IaaS API accepts the natively tenant-scoped JWT token
+                                pco_client.get("/iaas/api/integrations?apiVersion=2021-07-15")
+                                iaas_ready = True
+                                break
+                            except Exception as exc:
+                                if any(err in str(exc) for err in ("403", "404", "401", "500", "did not return")):
+                                    info("IaaS API syncing permissions; retrying in 15s...")
+                                    time.sleep(15)
+                                else:
+                                    raise RuntimeError(f"Unexpected error during PCO auth: {exc}")
+                        
+                        if not iaas_ready or not pco_client:
+                            raise RuntimeError("Timed out waiting for Provider Consumption Org roles to sync.")
+                        
+                        info("Provider Consumption Org IaaS context is ready.")
+                        
+                        # Pass the working, scoped PCO client to the integration function
+                        for integration in integrations:
+                            if str(integration.get("type", "")).lower() == "vro":
+                                configure_orchestrator_integration(pco_client, integration)
+                    
+                    # Skip standard tenant creation, users, and quotas
+                    continue
+
+                # Standard Tenant Processing
                 tenant = create_provider_organization_if_missing(
                     provider_client,
                     effective_org_cfg,
                 )
 
-                if effective_org_cfg.get("first_user"):
+                if effective_org_cfg.get("first_user") and effective_org_cfg["first_user"].get("username"):
                     effective_first_user_cfg = dict(
                         effective_org_cfg["first_user"]
                     )
 
                     create_token = bool(
-                        effective_first_user_cfg.get(
-                            "create_token",
-                            False,
-                        )
+                        effective_first_user_cfg.get("create_token", False)
                     )
 
                     replace_token = bool(
-                        effective_first_user_cfg.get(
-                            "replace_token",
-                            False,
-                        )
+                        effective_first_user_cfg.get("replace_token", False)
                     )
 
-                    # replace_token only makes sense when token creation is
-                    # enabled for this run.
                     if replace_token and not create_token:
                         warn(
                             f"Organization '{org_name}' first_user has "
@@ -12036,17 +12364,10 @@ def main():
                         )
 
                     if create_token:
-                        if not str(
-                            effective_first_user_cfg.get(
-                                "api_token_file",
-                                "",
-                            )
-                            or ""
-                        ).strip():
+                        if not str(effective_first_user_cfg.get("api_token_file", "") or "").strip():
                             raise RuntimeError(
                                 f"vcfa.provider.organizations['{org_name}']."
-                                "first_user.api_token_file is required when "
-                                "create_token=true"
+                                "first_user.api_token_file is required when create_token=true"
                             )
 
                     create_first_user_if_missing(
@@ -12061,7 +12382,7 @@ def main():
                 else:
                     raise RuntimeError(
                         f"vcfa.provider.organizations['{org_name}']."
-                        "first_user is required for every tenant"
+                        "first_user is required for every standard tenant"
                     )
 
                 region_quota = region_quota_if_missing(
@@ -12317,6 +12638,7 @@ def main():
                     provider_org_cfg,
                     organization_libraries_cfg,
                     config_dir,
+                    skip_upload=args.skip_content_library_upload,
                 )
 
             namespace_classes_cfg = org_cfg.get("namespaceClasses")
@@ -12394,10 +12716,16 @@ def main():
                     config_dir,
                 )
 
-            if org_cfg.get("deployments"):
-                warn(
-                    f"deployments configured for '{name}' but deployment "
-                    "processing is not implemented yet"
+            deployments_cfg = org_cfg.get("deployments") or []
+            if deployments_cfg:
+                print(f"\n--- Deployments: {name} ---")
+                configure_organization_deployments(
+                    org_client,
+                    vcfa_cfg["server"],
+                    name,
+                    org_cfg,
+                    config_dir,
+                    not ignore,
                 )
 
     if vc_rest:
