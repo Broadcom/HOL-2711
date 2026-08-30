@@ -1203,20 +1203,6 @@
         ],
         "catalog_items": [],
         "deployments": [
-          {
-            "blueprint_name": "Ubuntu VM",
-            "deployment_name": "next big demo",
-            "project_name": "next-big-medtech-app",
-            "bulk_request_count": 1,
-            "version":"1.0",
-            "inputs":
-            {
-              "namespace":"ns-new-scitech-app-7hmlb",
-              "vm_class":"best-effort-small",
-              "storage_class":"vsan-default-storage-policy"
-            },
-            "deploy_as": "medtech.user01"
-          }
         ]
       }
     }

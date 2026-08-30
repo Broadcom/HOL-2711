@@ -35,8 +35,11 @@ except ImportError:
 # Logging
 # ============================================================
 
+DEBUG_MODE = False
+
 def info(message: str) -> None:
-    print(f"[INFO]   {message}")
+    if DEBUG_MODE:
+        print(f"[INFO]   {message}")
 
 
 def create(message: str) -> None:
@@ -48,7 +51,8 @@ def update(message: str) -> None:
 
 
 def skip(message: str) -> None:
-    print(f"[SKIP]   {message}")
+    if DEBUG_MODE:
+        print(f"[SKIP]   {message}")
 
 
 def warn(message: str) -> None:
@@ -11420,7 +11424,9 @@ def compare_supervisor_namespace(
         case_insensitive=True,
     )
 
-    if desired_shared_vpc is not None:
+    # Only compare if the API actually returns the sharedVpc field,
+    # as the CCI API frequently omits it from the GET response.
+    if desired_shared_vpc is not None and existing_shared_vpc is not None:
         compare_scalar(
             "sharedVpc",
             bool(desired_shared_vpc),
@@ -11810,7 +11816,10 @@ def configure_organization_deployments(
         # Check if the deployment already exists
         encoded_name = urllib.parse.quote(f"name eq '{deployment_name}'", safe="")
         try:
-            res = client.get(f"/deployment/api/deployments?$filter={encoded_name}")
+            res = client.get(
+                f"/deployment/api/deployments?$filter={encoded_name}&apiVersion=2020-08-25",
+                headers={"Accept": "application/json"}
+            )
         except RuntimeError as exc:
             raise RuntimeError(f"Failed to query existing deployments: {exc}") from None
             
@@ -11826,19 +11835,32 @@ def configure_organization_deployments(
 
         deploy_client = client
         if deploy_as:
-            info(f"Authenticating as '{deploy_as}@{org_name}' for deployment '{deployment_name}'")
-            admin_cfg = organization_admin_config(org_name, org_cfg)
-            password_file_value = str(admin_cfg.get("password_file", "")).strip()
+            info(f"Authenticating as LDAP user '{deploy_as}@{org_name}' for deployment '{deployment_name}'")
+            
+            password_file_value = str(cfg.get("password_file", "")).strip()
             if not password_file_value:
-                raise RuntimeError(f"Cannot deploy as '{deploy_as}'; org_admin.password_file is missing")
+                raise RuntimeError(f"Cannot deploy as '{deploy_as}'; 'password_file' is missing in the deployment JSON.")
             
             password = read_text_file(resolve_path(password_file_value, config_dir))
-            deploy_client, _ = vcfa_tenant_password_session(
+            
+            # Use the /sessions endpoint via Basic auth. This natively supports LDAP bind!
+            _, access_token = vcfa_tenant_password_session(
                 server,
                 org_name,
                 deploy_as,
                 password,
                 verify,
+            )
+            
+            # Build a dedicated client for the user with purely modern headers
+            # We explicitly drop the "version=10.0.0.0-alpha" header so the modern API RBAC accepts it
+            deploy_client = RestClient(
+                server,
+                verify=verify,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Accept": "application/json"
+                }
             )
 
         body = {
@@ -11852,16 +11874,24 @@ def configure_organization_deployments(
             body["version"] = version
 
         create(f"Deployment '{deployment_name}' from blueprint '{blueprint_name}' as '{deploy_as or 'org admin'}'")
-        deploy_client.post("/blueprint/api/blueprint-requests", json=body)
+        
+        # Pass apiVersion and clean Accept header to ensure modern API processing succeeds
+        deploy_client.post(
+            "/blueprint/api/blueprint-requests?apiVersion=2019-09-12", 
+            json=body,
+            headers={"Accept": "application/json"}
+        )
         
         # Sleep briefly to ensure the request is registered by the backend
         time.sleep(3)
+
 # ============================================================
 # Main orchestration
 # Shared REST/CCI reconciliation primitives are defined above.
 # ============================================================
 
 def main():
+    global DEBUG_MODE
     parser = argparse.ArgumentParser()
     parser.add_argument("config", help="Path to JSON configuration")
     parser.add_argument(
@@ -11869,7 +11899,14 @@ def main():
         action="store_true", 
         help="Skip uploading files to provider and organization content libraries"
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show detailed execution information"
+    )
     args = parser.parse_args()
+
+    DEBUG_MODE = args.debug
 
     config_path = Path(args.config).expanduser().resolve()
     config_dir = config_path.parent
@@ -12197,6 +12234,8 @@ def main():
             print("========================================")
 
             for org_name, org_cfg in orgs_cfg.items():
+                print(f"\n--- Provider Organization: {org_name} ---")
+                
                 if not isinstance(org_cfg, dict):
                     raise RuntimeError(
                         f"vcfa.provider.organizations['{org_name}'] must be an object"
@@ -12222,20 +12261,6 @@ def main():
                         iaas_ready = False
                         pco_client = None
                         
-                        # Fetch local admin credentials to perform JWT exchange
-                        local_auth = provider_cfg.get("local_auth", {})
-                        pco_username = str(local_auth.get("username", "admin")).strip()
-                        pco_password_file = str(local_auth.get("password_file", "")).strip()
-                        
-                        if not pco_password_file:
-                            raise RuntimeError("vcfa.provider.local_auth.password_file is required for PCO integrations")
-                            
-                        if "@" not in pco_username:
-                            pco_username = f"{pco_username}@system"
-                            
-                        pco_password = read_text_file(resolve_path(pco_password_file, config_dir))
-                        pco_auth = base64.b64encode(f"{pco_username}:{pco_password}".encode("utf-8")).decode("ascii")
-                        
                         while time.time() < deadline:
                             try:
                                 # Ensure the PCO has been created by the backend
@@ -12245,71 +12270,44 @@ def main():
                                     time.sleep(15)
                                     continue
                                 
-                                # 1. Get a legacy Actor session token for the System Admin (NO context header yet)
-                                session_res = requests.post(
-                                    f"https://{vcfa_cfg['server']}/cloudapi/1.0.0/sessions/provider",
-                                    headers={
-                                        "Authorization": f"Basic {pco_auth}",
-                                        "Accept": "application/json;version=9.1.0"
-                                    },
-                                    verify=not ignore,
-                                    timeout=120
-                                )
+                                pco_urn = object_id(pco_org)
+                                pco_uuid = pco_urn.split(":")[-1] if pco_urn else ""
                                 
-                                if not session_res.ok:
-                                    raise RuntimeError(f"Failed System session login: {session_res.text}")
-                                    
-                                legacy_token = session_res.headers.get("X-VMWARE-VCLOUD-ACCESS-TOKEN") or session_res.headers.get("x-vmware-vcloud-access-token")
-                                if not legacy_token:
-                                    raise RuntimeError("Failed to extract X-VMWARE-VCLOUD-ACCESS-TOKEN")
+                                # Use the Terraform Provider VCFA strategy:
+                                # Send the provider refresh token to the provider OAuth endpoint, 
+                                # but inject the X-VMWARE-VCLOUD-TENANT-CONTEXT header to receive an Actor JWT.
+                                refresh_token = read_text_file(resolve_path(provider_cfg["api_token_file"], config_dir))
                                 
-                                # 2. Register OAuth Client in PCO
-                                reg_res = requests.post(
-                                    f"https://{vcfa_cfg['server']}/oauth/tenant/ProviderConsumptionOrg/register",
-                                    json={"client_name": "pco-iaas-temp-client"},
-                                    headers={
-                                        "Authorization": f"Bearer {legacy_token}",
-                                        "Accept": "application/json"
-                                    },
-                                    verify=not ignore,
-                                    timeout=120
-                                )
-                                
-                                if not reg_res.ok:
-                                    raise RuntimeError(f"Failed OAuth register in PCO: {reg_res.text}")
-                                
-                                client_id = reg_res.json().get("client_id")
-                                
-                                # 3. Exchange legacy token for modern PCO-scoped JWT Bearer token
                                 token_res = requests.post(
-                                    f"https://{vcfa_cfg['server']}/oauth/tenant/ProviderConsumptionOrg/token",
+                                    f"https://{vcfa_cfg['server']}/oauth/provider/token",
                                     data={
-                                        "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
-                                        "assertion": legacy_token,
-                                        "client_id": client_id
+                                        "grant_type": "refresh_token",
+                                        "refresh_token": refresh_token
                                     },
                                     headers={
-                                        "Accept": "application/json;version=9.1.0",
-                                        "Content-Type": "application/x-www-form-urlencoded"
+                                        "Accept": "application/json",
+                                        "Content-Type": "application/x-www-form-urlencoded",
+                                        "X-VMWARE-VCLOUD-TENANT-CONTEXT": pco_uuid
                                     },
                                     verify=not ignore,
                                     timeout=120
                                 )
                                 
                                 if not token_res.ok:
-                                    raise RuntimeError(f"Failed JWT exchange in PCO: {token_res.text}")
+                                    raise RuntimeError(f"Failed to fetch Actor token: {token_res.text}")
                                     
                                 pco_jwt = token_res.json().get("access_token")
                                 if not pco_jwt:
-                                    raise RuntimeError("Failed to extract access_token from JWT exchange")
+                                    raise RuntimeError("Failed to extract access_token from response")
                                 
-                                # 4. Build RestClient with true PCO JWT
+                                # Build RestClient with the true, tenant-scoped Actor JWT
                                 pco_client = RestClient(
                                     vcfa_cfg["server"], 
                                     verify=not ignore, 
                                     headers={
                                         "Authorization": f"Bearer {pco_jwt}", 
-                                        "Accept": "application/json"
+                                        "Accept": "application/json",
+                                        "X-VMWARE-VCLOUD-TENANT-CONTEXT": pco_uuid
                                     }
                                 )
                                 
@@ -12318,7 +12316,7 @@ def main():
                                 iaas_ready = True
                                 break
                             except Exception as exc:
-                                if any(err in str(exc) for err in ("403", "404", "401", "500", "did not return")):
+                                if any(err in str(exc) for err in ("403", "404", "401", "500", "Failed to fetch")):
                                     info("IaaS API syncing permissions; retrying in 15s...")
                                     time.sleep(15)
                                 else:
