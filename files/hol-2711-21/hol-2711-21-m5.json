@@ -95,6 +95,7 @@
     "ignore_certificate_errors": true,
     "provider":
     {
+      "enable_provider_consumption_org": true,
       "api_token_file": "/home/holuser/Desktop/API Tokens/API-Provider.Admin-VCFA.txt",
       "local_auth": { 
         "username": "admin",
@@ -204,6 +205,25 @@
         }
       },
       "organizations": {
+        "provider_consumption_org": {
+          "display_name": "Provider Consumption Org", 
+          "description": "System organization for provider consumption",
+          "is_classic_tenant": false,
+          "is_provider_consumption_org": true,
+          "enabled": true,
+          "region_quota": {},
+          "resources": {},
+          "external_connection": {},
+          "first_user":{},
+          "integrations": [
+            {
+              "type": "vro",
+              "name": "embedded",
+              "host_name": "https://embedded.orchestrator",
+              "accept_self_signed_certificate": false
+            }
+          ]
+        },
         "fintech": {
           "display_name": "FinTech",
           "description": "FinTech Tenant",
@@ -542,6 +562,7 @@
             "test": true
           }
         },
+        "integrations": [],
         "namespaceClasses": [],
         "delete_default_project": true,
         "projects": [      
@@ -1181,7 +1202,8 @@
           }
         ],
         "catalog_items": [],
-        "deployments":[]
+        "deployments": [
+        ]
       }
     }
   }
