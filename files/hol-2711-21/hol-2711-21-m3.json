@@ -1086,7 +1086,8 @@
                   "actions": [
                     "CCI.Supervisor.Resource.*",
                     "Deployment.PowerOn",
-                    "Deployment.PowerOff"
+                    "Deployment.PowerOff",
+                    "Deployment.Delete"                 
                   ],
                   "authorities": [
                     "ROLE:member"
@@ -1116,7 +1117,8 @@
                   "actions": [
                     "CCI.Supervisor.Resource.VirtualMachine.PowerOff",
                     "Deployment.Create",
-                    "Deployment.Delete"
+                    "Deployment.Delete",
+                    "Deployment.PowerOff"
                   ],
                   "approvers": [
                     "ROLE:PROJECT_ADMINISTRATORS"
