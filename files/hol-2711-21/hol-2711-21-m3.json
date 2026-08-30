@@ -1101,7 +1101,15 @@
             "scope": "organization",
             "project_name": "next-big-medtech-app",
             "enforcement_type": "HARD",
-            "criteria": {},
+                        "criteria":{
+              "match_expression": [
+                {
+                  "key": "catalogItemId",
+                  "operator": "eq",
+                  "value": "Ubuntu VM"
+                }
+              ]
+            },
             "definition": {
               "allowed_actions": [
                 {
@@ -1183,7 +1191,7 @@
           }
         ],
         "catalog_items": [],
-        "deployments":[]
+        "deployments": []
       }
     }
   }
