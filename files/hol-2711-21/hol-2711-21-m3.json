@@ -1102,21 +1102,13 @@
             "scope": "organization",
             "project_name": "next-big-medtech-app",
             "enforcement_type": "HARD",
-                        "criteria":{
-              "match_expression": [
-                {
-                  "key": "catalogItemId",
-                  "operator": "eq",
-                  "value": "Ubuntu VM"
-                }
-              ]
+            "criteria":{
             },
             "definition": {
               "allowed_actions": [
                 {
                   "actions": [
                     "CCI.Supervisor.Resource.VirtualMachine.PowerOff",
-                    "Deployment.Create",
                     "Deployment.Delete",
                     "Deployment.PowerOff"
                   ],
