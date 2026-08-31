@@ -1086,7 +1086,8 @@
                   "actions": [
                     "CCI.Supervisor.Resource.*",
                     "Deployment.PowerOn",
-                    "Deployment.PowerOff"
+                    "Deployment.PowerOff",
+                    "Deployment.Delete"                 
                   ],
                   "authorities": [
                     "ROLE:member"
@@ -1101,14 +1102,23 @@
             "scope": "organization",
             "project_name": "next-big-medtech-app",
             "enforcement_type": "HARD",
-            "criteria": {},
+                        "criteria":{
+              "match_expression": [
+                {
+                  "key": "catalogItemId",
+                  "operator": "eq",
+                  "value": "Ubuntu VM"
+                }
+              ]
+            },
             "definition": {
               "allowed_actions": [
                 {
                   "actions": [
                     "CCI.Supervisor.Resource.VirtualMachine.PowerOff",
                     "Deployment.Create",
-                    "Deployment.Delete"
+                    "Deployment.Delete",
+                    "Deployment.PowerOff"
                   ],
                   "approvers": [
                     "ROLE:PROJECT_ADMINISTRATORS"
@@ -1183,7 +1193,7 @@
           }
         ],
         "catalog_items": [],
-        "deployments":[]
+        "deployments": []
       }
     }
   }

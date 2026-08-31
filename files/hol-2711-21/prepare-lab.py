@@ -10487,6 +10487,7 @@ def _policy_definition(
 
 
 def _normalize_policy_criteria(
+    client: RestClient,
     cfg: Dict[str, Any],
     policy_name: str,
 ) -> Optional[Dict[str, Any]]:
@@ -10498,6 +10499,7 @@ def _normalize_policy_criteria(
       criteria.match_expression
 
     and normalize to the VCF Automation Policy API shape.
+    Automatically resolves human-readable names to UUIDs for catalogItemId and blueprintId.
     """
     criteria = cfg.get("criteria")
 
@@ -10562,6 +10564,39 @@ def _normalize_policy_criteria(
                 f"[{index}].value is required"
             )
 
+        # --- Resolve Names to UUIDs for specific keys ---
+        if key in ("catalogItemId", "blueprintId") and isinstance(value, str):
+            # Only resolve if it doesn't already look like a standard UUID
+            if not re.match(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", value):
+                original_value = value
+                resolved_id = ""
+                
+                if key == "catalogItemId":
+                    encoded_val = urllib.parse.quote(value, safe="")
+                    try:
+                        res = client.get(f"/catalog/api/items?search={encoded_val}")
+                        items = res.get("content", []) if isinstance(res, dict) else []
+                        for item in items:
+                            if str(item.get("name", "")).strip().casefold() == value.casefold():
+                                resolved_id = str(item.get("id", ""))
+                                break
+                    except RuntimeError as e:
+                        warn(f"Failed to query catalog items for policy criteria resolution: {e}")
+                
+                elif key == "blueprintId":
+                    bp = _blueprint_by_name(client, value)
+                    if bp:
+                        resolved_id = str(bp.get("id", ""))
+                        
+                if resolved_id:
+                    info(f"Resolved policy criteria {key} '{original_value}' -> '{resolved_id}'")
+                    value = resolved_id
+                else:
+                    raise RuntimeError(
+                        f"Policy '{policy_name}' criteria requires {key} '{original_value}', "
+                        "but it could not be resolved to a valid ID. Ensure the item exists and is published."
+                    )
+
         expressions.append(
             {
                 "key": key,
@@ -10575,12 +10610,12 @@ def _normalize_policy_criteria(
     }
 
     # Preserve any additional API-supported criteria fields verbatim.
-    for key, value in criteria.items():
-        if key not in {
+    for k, v in criteria.items():
+        if k not in {
             "matchExpression",
             "match_expression",
         }:
-            normalized[key] = value
+            normalized[k] = v
 
     return normalized
 
@@ -10653,6 +10688,7 @@ def _normalize_policy_config(
         )
 
     criteria = _normalize_policy_criteria(
+        client,
         cfg,
         name,
     )

@@ -11,7 +11,7 @@
 # Source the .bashrc file for settings/paths/etc...
 . /home/holuser/.bashrc
 # Insert your custom code here:
-
+sshpass -f /home/holuser/creds.txt ssh -o StrictHostKeyChecking=no root@ops-a.site-a.vcf.lab "sed -i '/<struts>/a \ \ <constant name=\"struts.multipart.maxStringLength\" value=\"131072\"/>' /usr/lib/vmware-vcops/tomcat-web-app/webapps/ui/WEB-INF/classes/struts.xml && systemctl restart vmware-vcops-web"
 
 # Example to echo text into file on Console VM. 
 # NOTE: when this script runs, /lmchol is mounted to the "/" of the Console VM
