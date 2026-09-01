@@ -890,7 +890,7 @@ def vc_dynamic_id(
     """
     Build the DynamicID for normal vCenter inventory objects.
 
-    For VMHost and normal VirtualMachine objects the CIS tagging API expects
+    For HostSystem and normal VirtualMachine objects the CIS tagging API expects
     the raw managed-object ID (for example host-19 or vm-123). Do not append
     the vCenter instance UUID. Supervisor/VM Service VMs are skipped before
     reaching this code.

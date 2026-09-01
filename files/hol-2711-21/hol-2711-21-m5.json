@@ -11,7 +11,7 @@
           "description": "",
           "cardinality": "Multiple",
           "entity_types": [
-            "VMHost",
+            "HostSystem",
             "VirtualMachine"
           ],
           "tags": [
@@ -28,7 +28,7 @@
       ],
       "assignments": [
         {
-          "type": "VMHost",
+          "type": "HostSystem",
           "name": "esx-05a.site-a.vcf.lab",
           "tags": [
             {
@@ -38,7 +38,7 @@
           ]
         },
         {
-          "type": "VMHost",
+          "type": "HostSystem",
           "name": "esx-06a.site-a.vcf.lab",
           "tags": [
             {
@@ -48,7 +48,7 @@
           ]
         },
         {
-          "type": "VMHost",
+          "type": "HostSystem",
           "name": "esx-07a.site-a.vcf.lab",
           "tags": [
             {
