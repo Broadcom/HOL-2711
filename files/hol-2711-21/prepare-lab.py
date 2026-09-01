@@ -595,6 +595,7 @@ def find_vcenter_object(si, obj_type: str, name: str):
         "virtualmachine": vim.VirtualMachine,
         "vm": vim.VirtualMachine,
         "vmhost": vim.HostSystem,
+        "hostsystem": vim.HostSystem,
         "cluster": vim.ClusterComputeResource,
         "datacenter": vim.Datacenter,
         "datastore": vim.Datastore,
@@ -890,7 +891,7 @@ def vc_dynamic_id(
     """
     Build the DynamicID for normal vCenter inventory objects.
 
-    For VMHost and normal VirtualMachine objects the CIS tagging API expects
+    For HostSystem and normal VirtualMachine objects the CIS tagging API expects
     the raw managed-object ID (for example host-19 or vm-123). Do not append
     the vCenter instance UUID. Supervisor/VM Service VMs are skipped before
     reaching this code.
@@ -11921,6 +11922,72 @@ def configure_organization_deployments(
         # Sleep briefly to ensure the request is registered by the backend
         time.sleep(3)
 
+def force_vcfa_inventory_sync(client: RestClient, vc_server: str):
+    """
+    Forces VCFA to refresh its inventory with vCenter to instantly pick up new compute policies.
+    Fails the script immediately if the refresh cannot be triggered.
+    """
+    import xml.etree.ElementTree as ET
+    
+    info(f"Forcing VCFA to refresh with vCenter '{vc_server}' to discover compute policies...")
+    try:
+        # 1. Fetch registered vCenters asking strictly for XML to avoid the 406 error
+        res_text = client.get(
+            "/api/admin/extension/vimServerReferences",
+            headers={"Accept": "application/*+xml;version=9.1.0"}
+        )
+        
+        # 2. Parse the XML response
+        root = ET.fromstring(res_text)
+        refs = []
+        
+        # Scan the XML tree for vimServerReference elements (which contain 'name' and 'href' attributes)
+        for elem in root.iter():
+            if "name" in elem.attrib and "href" in elem.attrib:
+                refs.append(elem.attrib)
+                
+        vc_uuid = None
+        vc_name = None
+        
+        for ref in refs:
+            ref_name = str(ref.get("name", "")).strip()
+            href = str(ref.get("href", "")).strip()
+            
+            # Check for a partial name match
+            if vc_server.lower() in ref_name.lower():
+                # Extract the raw UUID from the end of the href URL
+                vc_uuid = href.rstrip("/").split("/")[-1]
+                vc_name = ref_name
+                break
+                
+        # FALLBACK: If exactly ONE vCenter is registered, just use it!
+        if not vc_uuid and len(refs) == 1:
+            vc_uuid = str(refs[0].get("href", "")).rstrip("/").split("/")[-1]
+            vc_name = str(refs[0].get("name", ""))
+            info(f"Exact name match failed, but found exactly one vCenter. Safely defaulting to '{vc_name}'.")
+
+        if not vc_uuid:
+            found_names = [r.get("name") for r in refs]
+            raise RuntimeError(
+                f"Could not locate vCenter '{vc_server}' in VCFA to trigger a manual refresh. "
+                f"Found vCenters: {found_names}"
+            )
+            
+        # 3. Trigger the manual refresh action with the extracted UUID
+        refresh_url = f"/api/admin/extension/vimServer/{vc_uuid}/action/refresh"
+        
+        client.post(
+            refresh_url,
+            headers={"Accept": "application/*+xml;version=9.1.0"}
+        )
+        
+        info(f"Successfully triggered manual refresh for vCenter '{vc_name}'.")
+        
+        # Pause briefly to let the refresh task initialize before polling begins
+        time.sleep(5)
+        
+    except Exception as e:
+        raise RuntimeError(f"Manual vCenter refresh attempt failed: {e}") from e
 # ============================================================
 # Main orchestration
 # Shared REST/CCI reconciliation primitives are defined above.
@@ -12161,12 +12228,19 @@ def main():
             print("\n========================================")
             print(" VCFA Infrastructure Policies")
             print("========================================")
+            
+            # --- NEW: Force VCFA to sync vCenter immediately ---
+            if vc_cfg.get("server"):
+                force_vcfa_inventory_sync(provider_client, vc_cfg["server"])
+            # ---------------------------------------------------
+            
             timeout = int(provider_cfg.get("compute_policy_sync_timeout_seconds", 600))
             poll = int(provider_cfg.get("compute_policy_sync_poll_seconds", 10))
             for policy in infra_cfg:
                 if policy.get("vc_compute_policy_name"):
                     wait_vcfa_compute_policy(provider_client, policy["vc_compute_policy_name"], timeout, poll)
                 create_infra_policy_if_missing(provider_client, policy)
+
 
         libraries_cfg = provider_cfg.get("provider_content_libraries") or {}
         if libraries_cfg:
