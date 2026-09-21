@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from xml.sax.saxutils import escape, quoteattr
 import xml.etree.ElementTree as ET
-
+import shutil        # <-- Add this
+import subprocess
 import requests
 import urllib3
 import mimetypes
@@ -1273,13 +1274,24 @@ def wait_vcfa_compute_policy(
             time.sleep(min(poll, remaining))
             continue
 
+        # --- NEW: Check policy status, not just existence ---
         for policy in values:
             if policy.get("name") == name:
-                info(
-                    f"VCFA discovered compute policy '{name}' "
-                    f"after {attempt} check(s)"
-                )
-                return policy
+                # VCFA usually uses 'status' (READY, PENDING, ERROR)
+                status = str(policy.get("status", "")).upper()
+                
+                if status in ("ERROR", "FAILED"):
+                    raise RuntimeError(f"vCenter compute policy '{name}' failed to import into VCFA. Status: {status}")
+                
+                if status in ("", "READY", "RESOLVED"):
+                    info(
+                        f"VCFA discovered compute policy '{name}' "
+                        f"and it is READY after {attempt} check(s)"
+                    )
+                    return policy
+                    
+                info(f"VCFA sees compute policy '{name}' but it is still '{status}'; waiting for READY...")
+        # ----------------------------------------------------
 
         remaining = max(0, int(deadline - time.time()))
 
@@ -1423,6 +1435,41 @@ def create_infra_policy_if_missing(
         if str(policy.get("name", "") or "").strip().casefold() == name.casefold():
             existing = policy
             break
+# --- NEW: Auto-nuke zombie policies (with smart wait) ---
+    if existing is not None:
+        status_markers = [
+            str(existing.get("creationStatus", "")).upper(),
+            str(existing.get("syncStatus", "")).upper(),
+            str(existing.get("status", "")).upper()
+        ]
+        
+        if any(bad in status_markers for bad in ["FAILED", "ERROR", "SCHEDULED_FOR_DELETION", "NOT_SYNCHED", "NOT_SYNCED", "PENDING"]):
+            warn(f"Infrastructure policy '{name}' is in a stuck/zombie state. Deleting it to start fresh.")
+            policy_id = str(existing.get("id", ""))
+            if policy_id:
+                encoded_id = urllib.parse.quote(policy_id, safe="")
+                client.delete(f"/cloudapi/v1/infraPolicies/{encoded_id}")
+                
+                info(f"Waiting for VCFA to finish deleting zombie policy '{name}'...")
+                deadline = time.time() + 60
+                while time.time() < deadline:
+                    still_exists = False
+                    # Check if it is still in the active inventory
+                    for p in vcfa_infra_policies(client):
+                        if str(p.get("name", "")).strip().casefold() == name.casefold():
+                            still_exists = True
+                            break
+                            
+                    if not still_exists:
+                        info(f"Zombie policy '{name}' successfully wiped from database.")
+                        break
+                        
+                    time.sleep(3)
+                else:
+                    raise RuntimeError(f"Timed out waiting for VCFA to delete zombie policy '{name}'.")
+                    
+                existing = None # Safe to recreate now
+    # --------------------------------------
 
     if existing is None:
         info(
@@ -11993,6 +12040,42 @@ def force_vcfa_inventory_sync(client: RestClient, vc_server: str):
 # Shared REST/CCI reconciliation primitives are defined above.
 # ============================================================
 
+def clear_firefox_data():
+    info("Closing Firefox to clear stale session data...")
+    # Force close Firefox
+    subprocess.run(["pkill", "firefox"], stderr=subprocess.DEVNULL)
+    time.sleep(2)
+
+    # Define standard Ubuntu Firefox paths
+    cache_base_dir = Path.home() / ".cache" / "mozilla" / "firefox"
+    profile_base_dir = Path.home() / ".mozilla" / "firefox"
+
+    info("Clearing Firefox cache...")
+    if cache_base_dir.exists():
+        for profile in cache_base_dir.iterdir():
+            if profile.is_dir():
+                cache2 = profile / "cache2"
+                startup_cache = profile / "startupCache"
+                
+                if cache2.exists():
+                    shutil.rmtree(cache2, ignore_errors=True)
+                if startup_cache.exists():
+                    shutil.rmtree(startup_cache, ignore_errors=True)
+
+    info("Clearing Firefox cookies...")
+    if profile_base_dir.exists():
+        for profile in profile_base_dir.iterdir():
+            if profile.is_dir():
+                cookies_db = profile / "cookies.sqlite"
+                
+                if cookies_db.exists():
+                    try:
+                        cookies_db.unlink()
+                    except Exception as e:
+                        warn(f"Could not delete {cookies_db}: {e}")
+
+    print("[CLEARED] Firefox cache and cookies have been wiped for a fresh SSO session.")
+
 def main():
     global DEBUG_MODE
     parser = argparse.ArgumentParser()
@@ -12229,10 +12312,21 @@ def main():
             print(" VCFA Infrastructure Policies")
             print("========================================")
             
-            # --- NEW: Force VCFA to sync vCenter immediately ---
-            if vc_cfg.get("server"):
+            # --- NEW: Check if policies already exist before refreshing ---
+            existing_infra = vcfa_infra_policies(provider_client)
+            existing_names = [str(p.get("name", "")).strip().casefold() for p in existing_infra]
+            
+            needs_refresh = False
+            for policy in infra_cfg:
+                if str(policy.get("name", "")).strip().casefold() not in existing_names:
+                    needs_refresh = True
+                    break
+                    
+            if needs_refresh and vc_cfg.get("server"):
                 force_vcfa_inventory_sync(provider_client, vc_cfg["server"])
-            # ---------------------------------------------------
+            elif not needs_refresh:
+                skip("All configured infrastructure policies already exist; skipping vCenter refresh")
+            # --------------------------------------------------------------
             
             timeout = int(provider_cfg.get("compute_policy_sync_timeout_seconds", 600))
             poll = int(provider_cfg.get("compute_policy_sync_poll_seconds", 10))
@@ -12847,6 +12941,9 @@ def main():
 
     print("\nConfiguration completed successfully.")
 
+    # --- NEW: Clear browser data at the end ---
+    clear_firefox_data()
+    # ------------------------------------------
 
 if __name__ == "__main__":
     script_start_time = time.monotonic()
