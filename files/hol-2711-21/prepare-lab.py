@@ -12941,9 +12941,9 @@ def main():
 
     print("\nConfiguration completed successfully.")
 
-    # --- NEW: Clear browser data at the end ---
-    clear_firefox_data()
-    # ------------------------------------------
+    # # --- NEW: Clear browser data at the end ---
+    # clear_firefox_data()
+    # # ------------------------------------------
 
 if __name__ == "__main__":
     script_start_time = time.monotonic()
