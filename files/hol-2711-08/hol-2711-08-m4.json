@@ -18,7 +18,7 @@
           "tags": [
             {
               "name": "management",
-              "description": "Host running Linux OS VMs"
+              "description": "Management VMs"
             }
           ]
         }
