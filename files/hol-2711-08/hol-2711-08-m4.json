@@ -1,0 +1,42 @@
+{
+  "vcenter": {
+    "server": "vc-mgmt-a.site-a.vcf.lab",
+    "ignore_certificate_errors": true,
+    "username": "administrator@vsphere.local",
+    "password_file": "/home/holuser/Desktop/PASSWORD.txt",
+    "tags": {
+      "categories": [
+        {
+          "name": "environment",
+          "description": "",
+          "cardinality": "Multiple",
+          "entity_types": [
+            "HostSystem",
+            "VirtualMachine",
+            "ClusterComputeResource"
+          ],
+          "tags": [
+            {
+              "name": "management",
+              "description": "Host running Linux OS VMs"
+            }
+          ]
+        }
+      ],
+      "assignments": [
+        {
+          "type": "cluster",
+          "name": "cluster-mgmt-01a",
+          "tags": [
+            {
+              "category": "environment",
+              "tag": "management"
+            }
+          ]
+        }
+      ]
+    },
+    "policies": []
+  },
+  "vcfa": {}
+}
