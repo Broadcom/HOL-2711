@@ -1143,47 +1143,7 @@
             }
           }
         ],
-        "blueprints": [
-          {
-            "name": "Ubuntu VM",
-            "description": "",
-            "project_name": "next-big-medtech-app",
-            "yaml_file": "/home/holuser/Documents/files/hol-2711-21/simple-vm.yaml",
-            "icon_file": "/home/holuser/Documents/files/icons/ubuntu.jpg",
-            "version": "1.0",
-            "version_description": "Initial Release",
-            "change_log": "Initial Release",
-            "publish": true,
-            "request_scope_org": true,
-            "replace_icon": "true"
-          },
-          {
-            "name": "NGINX Container",
-            "description": "",
-            "project_name": "next-big-medtech-app",
-            "yaml_file": "/home/holuser/Documents/files/hol-2711-21/simple-container.yaml",
-            "icon_file": "/home/holuser/Documents/files/icons/nginx.png",
-            "version": "1.0",
-            "version_description": "Initial Release",
-            "change_log": "Initial Release",
-            "publish": true,
-            "request_scope_org": true,
-            "replace_icon": "true"
-          },
-          {
-            "name": "VKS Cluster",
-            "description": "",
-            "project_name": "next-big-medtech-app",
-            "yaml_file": "/home/holuser/Documents/files/hol-2711-21/simple-vks.yaml",
-            "icon_file": "/home/holuser/Documents/files/icons/k8s.png",
-            "version": "1.0",
-            "version_description": "Initial Release",
-            "change_log": "Initial Release",
-            "publish": true,
-            "request_scope_org": true,
-            "replace_icon": "true"
-          }
-        ],
+        "blueprints": [],
         "catalog_items": [],
         "deployments": []
       }
