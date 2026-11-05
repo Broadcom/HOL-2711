@@ -1,0 +1,29 @@
+formatVersion: 1
+inputs: {}
+resources:
+  CCI_Supervisor_Namespace_1:
+    type: CCI.Supervisor.Namespace
+    properties:
+      vpcName: 'default-us-east-a'
+      className: small
+      regionName: 'us-east-a'
+      generateName: Sup-${count.index}
+      existing: false
+  Virtual_Machine_1:
+    type: CCI.Supervisor.Resource
+    properties:
+      context: ${resource.CCI_Supervisor_Namespace_1.id}
+      manifest:
+        apiVersion: vmoperator.vmware.com/v1alpha5
+        kind: VirtualMachine
+        metadata:
+          name: virtual-machine-1
+        spec:
+          className: ''
+          imageName: ''
+          powerState: PoweredOn
+          storageClass: ''
+      wait:
+        conditions:
+          - type: VirtualMachineCreated
+            status: 'True'

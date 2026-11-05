@@ -21,7 +21,7 @@ outputs:
     value: ${resource.LoadBalancer.object.status.loadBalancer.ingress[0].ip}
   __deploymentOverview:
     value: |-
-      ## Linux VM with SSH published on a load balancer
+      ≥## Linux VM with SSH published on a load balancer
 
       A VM Service virtual machine was created in the supervisor namespace and
       published through a load balancer on port 22.
