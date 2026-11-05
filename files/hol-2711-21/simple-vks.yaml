@@ -10,6 +10,10 @@ inputs:
     type: string
     title: VM Class / Size
     $data: /data/virtualmachineclasses?namespace={{namespace}}
+  storage_class:
+    type: string
+    title: Storage class
+    $data: /data/storageclasses?namespace={{namespace}}
 outputs:
   controlPlaneEndpoint:
     value: ${resource.Kubernetes_Cluster_1.object.spec.controlPlaneEndpoint.host}:${resource.Kubernetes_Cluster_1.object.spec.controlPlaneEndpoint.port}
@@ -19,10 +23,10 @@ outputs:
     value: |-
       ## VKS Kubernetes cluster
 
-      * Cluster: `${resource.Kubernetes_Cluster_1.object.metadata.name}`
-      * Namespace: `${input.namespace}`
-      * Control plane API: `https://${resource.Kubernetes_Cluster_1.object.spec.controlPlaneEndpoint.host}:${resource.Kubernetes_Cluster_1.object.spec.controlPlaneEndpoint.port}`
-      * Control plane nodes ready: `${resource.Kubernetes_Cluster_1.object.status.controlPlane.readyReplicas}`
+      - Cluster: `${resource.Kubernetes_Cluster_1.object.metadata.name}`
+      - Namespace: `${input.namespace}`
+      - Control plane API: `https://${resource.Kubernetes_Cluster_1.object.spec.controlPlaneEndpoint.host}:${resource.Kubernetes_Cluster_1.object.spec.controlPlaneEndpoint.port}`
+      - Control plane nodes ready: `${resource.Kubernetes_Cluster_1.object.status.controlPlane.readyReplicas}`
 
       **Get a kubeconfig and connect** (the `kubectl-vsphere` plugin is
       deprecated and is not installed on the console; use the VCF CLI):
@@ -70,7 +74,7 @@ resources:
               - name: vsphereOptions
                 value:
                   persistentVolumes:
-                    defaultStorageClass: vsan-default-storage-policy
+                    defaultStorageClass: ${input.storage_class}
               - name: kubernetes
                 value:
                   certificateRotation:
@@ -79,7 +83,7 @@ resources:
               - name: vmClass
                 value: ${input.vm_class}
               - name: storageClass
-                value: vsan-default-storage-policy
+                value: ${input.storage_class}
             controlPlane:
               replicas: 1
               metadata:
