@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from xml.sax.saxutils import escape, quoteattr
 import xml.etree.ElementTree as ET
-import shutil        # <-- Add this
+import shutil
 import subprocess
 import requests
 import urllib3
