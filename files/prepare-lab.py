@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from xml.sax.saxutils import escape, quoteattr
 import xml.etree.ElementTree as ET
-import shutil        # <-- Add this
+import shutil
 import subprocess
 import requests
 import urllib3
@@ -1320,7 +1320,90 @@ def wait_vcfa_compute_policy(
 def vcfa_infra_policies(client: RestClient):
     return client.paged("/cloudapi/v1/infraPolicies")
 
+def create_or_replace_provider_admin_api_token(
+    server: str,
+    username: str,
+    password_file_value: str,
+    api_token_file_value: str,
+    config_dir: Path,
+    verify: bool,
+    replace_token: bool = False,
+) -> str:
+    """
+    Create or replace an API token for a VCFA LOCAL provider user.
+    """
+    api_token_file = resolve_path(api_token_file_value, config_dir)
+    password = read_text_file(resolve_path(password_file_value, config_dir))
+    token_name = api_token_file.stem
 
+    info(f"Authenticating as provider user '{username}@system' for API token creation")
+    
+    # 1. Get the session client, token, and user URN
+    provider_session_client, session_access_token, user_id = vcfa_provider_password_session(
+        server,
+        username,
+        password,
+        verify,
+    )
+
+    if replace_token:
+        # 2. Check for existing tokens using the FIQL filtered lookup
+        existing_tokens = vcfa_user_api_tokens_by_name(
+            provider_session_client,
+            user_id,
+            token_name,
+        )
+        for existing_token in existing_tokens:
+            token_id = object_id(existing_token)
+            if token_id:
+                update(f"Revoke API token '{token_name}' [{token_id}]")
+                delete_vcfa_api_token_by_id(provider_session_client, token_id)
+            
+        if existing_tokens:
+            time.sleep(1)
+
+    action = "REPLACED" if replace_token else "CREATED"
+    create(f"Provider API token '{token_name}' for '{username}@system'")
+
+    # 3. Register the OAuth client
+    registered = provider_session_client.post(
+        "/oauth/provider/register",
+        json={"client_name": token_name},
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+    )
+
+    if not isinstance(registered, dict) or not registered.get("client_id"):
+        raise RuntimeError("VCFA provider token registration did not return a valid client_id.")
+
+    client_id = str(registered["client_id"]).strip()
+
+    # 4. Exchange the session assertion for a refresh token
+    token_response = provider_session_client.post(
+        "/oauth/provider/token",
+        data={
+            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            "assertion": session_access_token,
+            "client_id": client_id,
+        },
+        headers={
+            "Accept": "application/json;version=9.1.0",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+    )
+
+    if not isinstance(token_response, dict) or not token_response.get("refresh_token"):
+        raise RuntimeError("Provider API token request did not return a refresh_token.")
+
+    refresh_token = str(token_response["refresh_token"]).strip()
+
+    # 5. Save to disk
+    write_secret_file(api_token_file, refresh_token)
+    print(f"[{action}] Provider API token for '{username}@system' saved to '{api_token_file}'")
+
+    return refresh_token
 def normalize_infra_policy_rule(value: Any) -> Any:
     """
     Convert the JSON-friendly infrastructure policy rule schema to the VCFA
@@ -2781,13 +2864,65 @@ def bare_org_uuid(org_id: str) -> str:
 
     return value
 
-
-def vcfa_provider_local_session(
+def vcfa_provider_password_session(
     server: str,
     username: str,
     password: str,
     verify: bool,
-) -> RestClient:
+) -> tuple[RestClient, str, str]:
+    """
+    Authenticate a provider user and return the client, token, and user URN
+    specifically for OAuth token generation.
+    """
+    basic_value = f"{username}@system:{password}"
+    encoded = base64.b64encode(basic_value.encode("utf-8")).decode("ascii")
+
+    session = requests.Session()
+    session.verify = verify
+
+    response = session.post(
+        f"https://{server}/cloudapi/1.0.0/sessions/provider",
+        headers={
+            "Authorization": f"Basic {encoded}",
+            "Accept": "application/json;version=9.1.0",
+        },
+        timeout=120,
+    )
+
+    if not response.ok:
+        raise RuntimeError(f"Failed to create provider password session: HTTP {response.status_code}")
+
+    access_token = (
+        response.headers.get("x-vmware-vcloud-access-token")
+        or response.headers.get("X-VMWARE-VCLOUD-ACCESS-TOKEN")
+    )
+    
+    if not access_token:
+        raise RuntimeError("Provider login succeeded but missing access token.")
+
+    client = RestClient(
+        server,
+        verify=verify,
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json;version=10.0.0.0-alpha",
+        },
+    )
+
+    # Reliably fetch the user ID from the active session context
+    session_info = client.get("/cloudapi/1.0.0/sessions/current")
+    user_id = ""
+    
+    if isinstance(session_info, dict):
+        user_ref = session_info.get("user") or {}
+        user_id = str(user_ref.get("id", "")).strip()
+
+    if not user_id:
+        raise RuntimeError("Could not retrieve user URN from /cloudapi/1.0.0/sessions/current.")
+
+    return client, access_token, user_id
+
+def vcfa_provider_local_session(server: str, username: str, password: str, verify: bool, ) -> RestClient:
     """
     Create a VCFA provider session using a VCFA-LOCAL provider account.
 
@@ -3018,10 +3153,57 @@ def write_secret_file(path: Path, value: str) -> None:
     except OSError:
         pass
 
-
-def vcfa_api_tokens(
+def vcfa_user_api_tokens_by_name(
     client: RestClient,
+    user_id: str,
+    token_name: str,
 ) -> List[Dict[str, Any]]:
+    """Fetch tokens using the FIQL filter: owner.id==<urn>;(type==PROXY,type==REFRESH)"""
+    filter_string = f"owner.id=={user_id};(type==PROXY,type==REFRESH)"
+    encoded_filter = urllib.parse.quote(filter_string, safe="=(),;")
+
+    path = (
+        f"/cloudapi/1.0.0/tokens"
+        f"?page=1&pageSize=128"
+        f"&filterEncoded=true"
+        f"&filter={encoded_filter}"
+        f"&sortAsc=name"
+    )
+
+    payload = client.get(path)
+    
+    values = []
+    if isinstance(payload, dict):
+        values = payload.get("values") or payload.get("items") or payload.get("record") or []
+    elif isinstance(payload, list):
+        values = payload
+
+    return [
+        token for token in values
+        if isinstance(token, dict) and str(token.get("name", "")).strip() == token_name
+    ]
+
+def delete_vcfa_api_token_by_id(
+    client: RestClient,
+    token_id: str,
+) -> None:
+    """Delete a token by its URN."""
+    encoded_token_id = urllib.parse.quote(token_id, safe="")
+    client.delete(f"/cloudapi/1.0.0/tokens/{encoded_token_id}")
+
+def delete_vcfa_provider_api_token(client: RestClient,token: Dict[str, Any],) -> None:
+    token_id = object_id(token)
+
+    if not token_id:
+        raise RuntimeError(
+            f"Unable to determine ID for provider API token "
+            f"'{token.get('name', '<unnamed>')}'"
+        )
+
+    encoded_token_id = urllib.parse.quote(token_id, safe="")
+    client.delete(f"/cloudapi/1.0.0/provider/tokens/{encoded_token_id}")
+
+def vcfa_api_tokens(client: RestClient,) -> List[Dict[str, Any]]:
     """
     Return API token registrations visible to the authenticated tenant user.
     """
@@ -3031,11 +3213,7 @@ def vcfa_api_tokens(
     )
 
 
-def vcfa_api_tokens_by_name(
-    client: RestClient,
-    token_name: str,
-    username: Optional[str] = None,
-) -> List[Dict[str, Any]]:
+def vcfa_api_tokens_by_name( client: RestClient, token_name: str, username: Optional[str] = None,) -> List[Dict[str, Any]]:
     matches: List[Dict[str, Any]] = []
 
     for token in vcfa_api_tokens(client):
@@ -12265,6 +12443,17 @@ def main():
         print("========================================")
         for policy in vc_cfg.get("policies", []):
             vc_create_compute_policy_if_missing(vc_rest, policy)
+
+    if provider_cfg.get("local_auth") and provider_cfg["local_auth"].get("create_token"):
+        create_or_replace_provider_admin_api_token(
+            vcfa_cfg["server"],
+            provider_cfg["local_auth"]["username"],
+            provider_cfg["local_auth"]["password_file"],
+            provider_cfg["api_token_file"],
+            config_dir,
+            not ignore,
+            replace_token=provider_cfg["local_auth"].get("replace_token", False)
+    )
 
     provider_client = None
     if vcfa_cfg.get("server") and provider_cfg:
