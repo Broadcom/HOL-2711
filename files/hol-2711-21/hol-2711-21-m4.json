@@ -98,8 +98,10 @@
       "enable_provider_consumption_org": true,
       "api_token_file": "/home/holuser/Desktop/API Tokens/API-Provider.Admin-VCFA.txt",
       "local_auth": { 
+        "create_token": true,
         "username": "admin",
-        "password_file": "/home/holuser/Desktop/PASSWORD.txt"
+        "password_file": "/home/holuser/Desktop/PASSWORD.txt",
+        "replace_token": true
       },
       "compute_policy_sync_timeout_seconds": 600,
       "compute_policy_sync_poll_seconds": 10,
